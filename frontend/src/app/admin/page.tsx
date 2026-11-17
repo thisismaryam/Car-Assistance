@@ -105,8 +105,8 @@ export default function AdminDashboard() {
                                 </tr>
                             ) : (
                                 bookings.map((b: any) => (
-                                    <tr key={b.id} className="border-b border-gray-800 hover:bg-[#202325] transition-colors">
-                                        <td className="px-6 py-4 font-mono text-[#F07835]">#{b.id}</td>
+                                    <tr key={b.id} className="border-b border-[#1e293b] hover:bg-[#151D2A] transition-colors">
+                                        <td className="px-6 py-4 font-mono text-[#2563EB]">#{b.id}</td>
                                         <td className="px-6 py-4">{new Date(b.scheduled_at).toLocaleString()}</td>
                                         <td className="px-6 py-4 font-bold text-white">
                                             {b.customer?.full_name || `User ${b.customer_id}`}
@@ -129,7 +129,7 @@ export default function AdminDashboard() {
                                                 {b.status === 'pending' && (
                                                     <button
                                                         onClick={() => updateStatus(b.id, 'confirmed')}
-                                                        className="text-xs bg-[#F07835] hover:bg-orange-600 text-white px-3 py-1 rounded-md transition-colors font-bold"
+                                                        className="text-xs bg-[#2563EB] hover:bg-blue-700 text-white px-3 py-1 rounded-md transition-colors font-bold"
                                                     >
                                                         Confirm
                                                     </button>

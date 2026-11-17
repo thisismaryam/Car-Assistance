@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import Link from "next/link";
+import ChatWidget from "../components/ChatWidget";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -33,6 +34,7 @@ export default function RootLayout({
                             <Link href="/services" className="hover:text-white transition-colors">Services</Link>
                             <Link href="/emergency" className="hover:text-white transition-colors">Roadside</Link>
                             <Link href="/dashboard" className="hover:text-white transition-colors">My Account</Link>
+                            <Link href="/admin/bookings" className="hover:text-white transition-colors">Admin</Link>
                         </div>
 
                         <div className="flex items-center gap-3">
@@ -49,8 +51,11 @@ export default function RootLayout({
                 </main>
 
                 <footer className="border-t border-[#101827] py-8 text-center text-gray-500 text-sm bg-[#080B12]">
-                    <p>© {new Date().getFullYear()} Car Assistance. All rights reserved.</p>
+                    <p>© 2026 Car Assistance. All rights reserved.</p>
                 </footer>
+
+                {/* Floating AI Assistant Widget */}
+                <ChatWidget />
             </body>
         </html>
     );

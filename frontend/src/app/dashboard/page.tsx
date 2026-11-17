@@ -3,25 +3,11 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
-type Vehicle = {
-    id: number;
-    make: string;
-    model: string;
-    year: number;
-    registration: string;
-};
-
-type Service = {
-    id: number;
-    name: string;
-    base_price: number;
-};
-
 export default function DashboardPage() {
     const router = useRouter();
     const [user, setUser] = useState<any>(null);
-    const [vehicles, setVehicles] = useState<Vehicle[]>([]);
-    const [services, setServices] = useState<Service[]>([]);
+    const [vehicles, setVehicles] = useState<any[]>([]);
+    const [services, setServices] = useState<any[]>([]);
 
     // Wizard State
     const [step, setStep] = useState(1);
@@ -42,18 +28,30 @@ export default function DashboardPage() {
         Promise.all([
             fetch("http://localhost:8000/auth/me", { headers }).then((res) => res.json()),
             fetch("http://localhost:8000/vehicles/my-vehicles", { headers }).then((res) => res.json()),
-            fetch("http://localhost:8000/services").then((res) => res.json()),
+            fetch("http://localhost:8000/services?service_type=workshop").then((res) => res.json()),
         ]).then(([userData, vehicleData, serviceData]) => {
             setUser(userData);
-            setVehicles(vehicleData);
-            setServices(serviceData);
+            setVehicles(Array.isArray(vehicleData) ? vehicleData : []);
+            // Enforce ONLY workshop services
+            const workshopServices = Array.isArray(serviceData)
+                ? serviceData.filter((s: any) => s.service_type === "workshop")
+                : [];
+            setServices(workshopServices);
 
-            if (vehicleData.length > 0 && !selectedVehicle) setSelectedVehicle(vehicleData[0].id.toString());
-            if (serviceData.length > 0 && !selectedService) setSelectedService(serviceData[0].id.toString());
+            if (Array.isArray(vehicleData) && vehicleData.length > 0 && !selectedVehicle) {
+                setSelectedVehicle(vehicleData[0].id.toString());
+            }
+            if (workshopServices.length > 0 && !selectedService) {
+                setSelectedService(workshopServices[0].id.toString());
+            }
         });
     };
 
-    useEffect(() => { fetchData(); }, [router]);
+    useEffect(() => {
+        // Prevent running on the server during pre-render
+        if (typeof window === "undefined") return;
+        fetchData();
+    }, [router]);
 
     const handleAddCar = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -177,18 +175,50 @@ export default function DashboardPage() {
                     </div>
                 )}
 
-                {/* STEP 2: SELECT SERVICE */}
+                {/* STEP 2: SELECT WORKSHOP SERVICE */}
                 {step === 2 && (
                     <div>
-                        <h2 className="text-lg font-bold text-white mb-4">Step 2: Select Service</h2>
-                        <select value={selectedService} onChange={e => setSelectedService(e.target.value)} className="w-full p-3 bg-[#080B12] border border-[#1e293b] rounded-lg text-white outline-none focus:border-[#2563EB] mb-6">
-                            {services.map((s: any) => (
-                                <option key={s.id} value={s.id}>{s.name} - {s.base_price} PKR</option>
-                            ))}
-                        </select>
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-lg font-bold text-white">Step 2: Select Workshop Service</h2>
+                            <span className="text-xs font-semibold px-2.5 py-1 rounded bg-[#2563EB]/15 text-[#2563EB] border border-[#2563EB]/30">Workshop Bay</span>
+                        </div>
+                        <p className="text-xs text-gray-400 mb-4">Choose a dedicated workshop bay service for your vehicle.</p>
+
+                        {services.length === 0 ? (
+                            <p className="text-sm text-gray-400 p-4 bg-[#080B12] rounded border border-[#1e293b]">No workshop services available at the moment.</p>
+                        ) : (
+                            <div className="grid gap-3 mb-6">
+                                {services.map((s: any) => {
+                                    const isSelected = selectedService === s.id.toString();
+                                    return (
+                                        <div
+                                            key={s.id}
+                                            onClick={() => setSelectedService(s.id.toString())}
+                                            className={`p-4 rounded-lg border cursor-pointer transition-all ${
+                                                isSelected
+                                                    ? "border-[#2563EB] bg-[#2563EB]/10"
+                                                    : "border-[#1e293b] bg-[#080B12] hover:border-gray-600"
+                                            }`}
+                                        >
+                                            <div className="flex justify-between items-start">
+                                                <div>
+                                                    <h3 className="font-bold text-white text-sm">{s.name}</h3>
+                                                    <p className="text-xs text-gray-400 mt-1 max-w-lg">{s.description}</p>
+                                                </div>
+                                                <div className="text-right ml-4">
+                                                    <span className="text-sm font-black text-white">${s.base_price}</span>
+                                                    <p className="text-[11px] text-gray-500">{s.duration_minutes} min</p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+
                         <div className="flex gap-3">
-                            <button onClick={() => setStep(1)} className="border border-[#1e293b] text-gray-400 px-6 py-2 rounded-md text-sm">Back</button>
-                            <button onClick={() => setStep(3)} className="bg-[#2563EB] text-white px-6 py-2 rounded-md text-sm font-bold flex-1">Continue to Date & Time →</button>
+                            <button onClick={() => setStep(1)} className="border border-[#1e293b] text-gray-400 px-6 py-2 rounded-md text-sm hover:text-white">Back</button>
+                            <button onClick={() => setStep(3)} disabled={!selectedService} className="bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 text-white px-6 py-2 rounded-md text-sm font-bold flex-1 transition-colors">Continue to Date & Time →</button>
                         </div>
                     </div>
                 )}
