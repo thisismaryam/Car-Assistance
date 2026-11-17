@@ -7,6 +7,7 @@ from app.models.vehicle import Vehicle
 from app.models.user import User
 from app.schemas.booking import BookingCreate, BookingRead, StatusUpdate
 from app.core.security import get_current_user, require_admin
+from app.utils.email import send_email
 
 router = APIRouter()
 
@@ -62,10 +63,44 @@ def get_all_bookings(db: Session = Depends(get_db), admin: User = Depends(requir
 
 @router.patch("/{booking_id}/status", response_model=BookingRead)
 def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
-    booking = db.query(Booking).filter(Booking.id == booking_id).first()
+    booking = db.query(Booking).options(
+        joinedload(Booking.customer),
+        joinedload(Booking.vehicle),
+        joinedload(Booking.service)
+    ).filter(Booking.id == booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
+
     booking.status = payload.status
     db.commit()
     db.refresh(booking)
+
+    # Task 3: When booking status is updated to confirmed, notify the customer via email
+    if payload.status.lower() == "confirmed":
+        customer = booking.customer
+        service = booking.service
+        vehicle = booking.vehicle
+        if customer and customer.email:
+            subject = f"Your Car Assistance Booking #{booking.id} is Confirmed"
+            service_name = service.name if service else "Service"
+            vehicle_info = f"{vehicle.year} {vehicle.make} {vehicle.model} ({vehicle.registration})" if vehicle else "Vehicle"
+            sched_str = booking.scheduled_at.strftime('%Y-%m-%d %H:%M UTC') if hasattr(booking.scheduled_at, 'strftime') else str(booking.scheduled_at)
+
+            body = (
+                f"Hello {customer.full_name},\n\n"
+                f"Your booking #{booking.id} with Car Assistance has been confirmed!\n\n"
+                f"Details:\n"
+                f"- Service: {service_name}\n"
+                f"- Vehicle: {vehicle_info}\n"
+                f"- Scheduled Time: {sched_str}\n"
+            )
+            if booking.address:
+                body += f"- Service Location: {booking.address}\n"
+            body += (
+                f"\nThank you for choosing Car Assistance.\n"
+                f"If you have any questions, you can contact our dispatch team or use the AI assistant on our portal."
+            )
+
+            send_email(to_email=customer.email, subject=subject, body=body)
+
     return booking

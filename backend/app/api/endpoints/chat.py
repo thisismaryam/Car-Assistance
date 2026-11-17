@@ -7,10 +7,16 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
-SYSTEM_PROMPT = (
-    "You are the Car Assistance AI. You can answer questions about our "
-    "workshop services, home services, and roadside emergencies. Keep answers short and helpful."
-)
+SYSTEM_PROMPT = """
+You are the Car Assistance AI. You help users with workshop bookings, home services, and roadside emergencies. 
+
+Here are the rules:
+1. Be concise, professional, and helpful.
+2. If a user says their car won't start or has a dead battery, recommend the "Jump-Start & Fuel Delivery" or "Home Battery Replacement" service immediately.
+3. If a user mentions squeaking brakes, recommend "Brake Pad Replacement".
+4. Always mention the price and duration if you know it.
+5. Keep responses under 3 sentences.
+"""
 
 
 class ChatMessage(BaseModel):
@@ -35,7 +41,7 @@ def call_groq(api_key: str, message: str, history: list[ChatMessage]) -> str:
     messages.append({"role": "user", "content": message})
 
     payload = {
-        "model": "llama-3.1-8b-instant",
+        "model": "openai/gpt-oss-120b",
         "messages": messages,
         "temperature": 0.3,
         "max_tokens": 300,
@@ -123,10 +129,15 @@ def fallback_kb_response(query: str) -> str:
             "Replacement ($79.99), and Home Tyre Change ($39.99). "
             "Book via the Home Service tab in your dashboard."
         )
-    if any(k in q for k in ["ac", "air condition", "cooling", "heat"]):
+    if any(k in q for k in ["diagnostic", "scan", "check engine", "obd"]):
         return (
-            "Our AC System Service ($89.99, 75 min) includes refrigerant recharge, "
-            "leak testing, and cabin air filter replacement at our workshop."
+            "Our Workshop Engine Diagnostics ($49.99, 60 min) provides a complete OBD-II scan, "
+            "live-data sensor analysis, and a printed fault report."
+        )
+    if any(k in q for k in ["limit", "daily limit", "max booking"]):
+        return (
+            "Customers can make up to 5 bookings per day. If you reach 5 bookings for a single date, "
+            "you will need to choose another day."
         )
     if any(k in q for k in ["tyre", "tire", "alignment", "wheel"]):
         return (
