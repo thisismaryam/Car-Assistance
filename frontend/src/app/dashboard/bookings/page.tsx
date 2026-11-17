@@ -2,15 +2,16 @@
 import { useEffect, useState } from "react";
 
 export default function MyBookingsPage() {
-    const [bookings, setBookings] = useState([]);
+    const [bookings, setBookings] = useState<any[]>([]);
 
     useEffect(() => {
+        if (typeof window === "undefined") return;
         const token = localStorage.getItem("token");
         fetch("http://localhost:8000/bookings/my", {
             headers: { Authorization: `Bearer ${token}` }
         })
             .then(res => res.json())
-            .then(data => setBookings(data));
+            .then(data => setBookings(Array.isArray(data) ? data : []));
     }, []);
 
     return (

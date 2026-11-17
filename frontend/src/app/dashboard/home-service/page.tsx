@@ -140,11 +140,18 @@ export default function HomeServicePage() {
 
             {/* Booking Wizard Container */}
             <div className="bg-[#151D2A] border border-[#1e293b] rounded-xl p-6 md:p-8 shadow-xl">
-                {/* Progress Bar */}
-                <div className="flex items-center gap-4 mb-8">
-                    <div className={`flex-1 h-1 rounded-full ${step >= 1 ? 'bg-[#2563EB]' : 'bg-[#1e293b]'}`} />
-                    <div className={`flex-1 h-1 rounded-full ${step >= 2 ? 'bg-[#2563EB]' : 'bg-[#1e293b]'}`} />
-                    <div className={`flex-1 h-1 rounded-full ${step >= 3 ? 'bg-[#2563EB]' : 'bg-[#1e293b]'}`} />
+                {/* Step Progress Bar - Clean & Professional */}
+                <div className="mb-8">
+                    <div className="flex items-center justify-between text-xs font-semibold mb-2">
+                        <span className={step >= 1 ? "text-[#2563EB]" : "text-gray-500"}>1. Vehicle</span>
+                        <span className={step >= 2 ? "text-[#2563EB]" : "text-gray-500"}>2. Home Service</span>
+                        <span className={step >= 3 ? "text-[#2563EB]" : "text-gray-500"}>3. Address & Confirm</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <div className={`flex-1 h-1 rounded-full transition-colors ${step >= 1 ? "bg-[#2563EB]" : "bg-[#1e293b]"}`} />
+                        <div className={`flex-1 h-1 rounded-full transition-colors ${step >= 2 ? "bg-[#2563EB]" : "bg-[#1e293b]"}`} />
+                        <div className={`flex-1 h-1 rounded-full transition-colors ${step >= 3 ? "bg-[#2563EB]" : "bg-[#1e293b]"}`} />
+                    </div>
                 </div>
 
                 {message && (
@@ -156,7 +163,8 @@ export default function HomeServicePage() {
                 {/* STEP 1: SELECT VEHICLE */}
                 {step === 1 && (
                     <div>
-                        <h2 className="text-base font-bold text-white mb-3">Step 1: Select your vehicle</h2>
+                        <h2 className="text-base font-bold text-white mb-2">Step 1: Select your vehicle</h2>
+                        <p className="text-xs text-gray-400 mb-4">Choose which vehicle needs doorstep mechanic service.</p>
 
                         {vehicles.length === 0 && !showAddCar ? (
                             <div className="text-center p-6 bg-[#090D14] rounded-lg border border-[#1e293b]">
@@ -180,22 +188,43 @@ export default function HomeServicePage() {
                             </form>
                         ) : (
                             <div className="grid gap-3">
-                                {vehicles.map((v: any) => (
-                                    <div
-                                        key={v.id}
-                                        onClick={() => setSelectedVehicle(v.id.toString())}
-                                        className={`p-4 rounded-lg border cursor-pointer transition-all ${selectedVehicle === v.id.toString() ? 'border-[#2563EB] bg-[#2563EB]/10' : 'border-[#1e293b] bg-[#090D14] hover:border-gray-600'}`}
-                                    >
-                                        <h3 className="font-bold text-white text-sm">{v.year} {v.make} {v.model}</h3>
-                                        <p className="text-xs text-gray-400 font-mono mt-0.5">{v.registration}</p>
-                                    </div>
-                                ))}
-                                <button onClick={() => setShowAddCar(true)} className="text-left text-xs text-[#2563EB] font-bold mt-2 hover:underline">+ Add another vehicle</button>
+                                {vehicles.map((v: any) => {
+                                    const isSelected = selectedVehicle === v.id.toString();
+                                    return (
+                                        <div
+                                            key={v.id}
+                                            onClick={() => setSelectedVehicle(v.id.toString())}
+                                            className={`p-4 rounded-lg border cursor-pointer transition-all ${
+                                                isSelected
+                                                    ? 'border-[#2563EB] bg-[#2563EB]/15'
+                                                    : 'border-[#1e293b] bg-[#090D14] hover:bg-[#1e293b] hover:border-gray-600'
+                                            }`}
+                                        >
+                                            <div className="flex justify-between items-center">
+                                                <div>
+                                                    <h3 className="font-bold text-white text-sm">{v.year} {v.make} {v.model}</h3>
+                                                    <p className="text-xs text-gray-400 font-mono mt-0.5">{v.registration}</p>
+                                                </div>
+                                                <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${isSelected ? 'border-[#2563EB] bg-[#2563EB]' : 'border-gray-600'}`}>
+                                                    {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                                <button onClick={() => setShowAddCar(true)} className="text-left text-xs text-[#2563EB] font-bold mt-1 hover:underline">+ Add another vehicle</button>
                             </div>
                         )}
 
                         {vehicles.length > 0 && !showAddCar && (
-                            <button onClick={() => setStep(2)} className="bg-[#2563EB] hover:bg-blue-700 text-white px-6 py-2 rounded-md text-xs font-bold mt-6 transition-colors">Continue to Home Service →</button>
+                            <div className="flex justify-end mt-6">
+                                <button
+                                    onClick={() => setStep(2)}
+                                    className="h-10 px-6 rounded-lg bg-[#2563EB] hover:bg-blue-700 text-white text-xs font-bold transition-colors flex items-center justify-center shadow-md shadow-blue-900/20"
+                                >
+                                    Continue to Home Service →
+                                </button>
+                            </div>
                         )}
                     </div>
                 )}
@@ -203,9 +232,9 @@ export default function HomeServicePage() {
                 {/* STEP 2: SELECT HOME SERVICE */}
                 {step === 2 && (
                     <div>
-                        <div className="flex justify-between items-center mb-4">
+                        <div className="flex justify-between items-center mb-2">
                             <h2 className="text-base font-bold text-white">Step 2: Select Home Service</h2>
-                            <span className="text-xs font-semibold px-2 py-0.5 rounded bg-[#2563EB]/15 text-[#2563EB] border border-[#2563EB]/30">Doorstep</span>
+                            <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-[#2563EB]/15 text-[#2563EB] border border-[#2563EB]/30">Doorstep</span>
                         </div>
                         <p className="text-xs text-gray-400 mb-4">Select the service to be performed at your doorstep.</p>
 
@@ -221,8 +250,8 @@ export default function HomeServicePage() {
                                             onClick={() => setSelectedService(s.id.toString())}
                                             className={`p-4 rounded-lg border cursor-pointer transition-all ${
                                                 isSelected
-                                                    ? "border-[#2563EB] bg-[#2563EB]/10"
-                                                    : "border-[#1e293b] bg-[#090D14] hover:border-gray-600"
+                                                    ? "border-[#2563EB] bg-[#2563EB]/15"
+                                                    : "border-[#1e293b] bg-[#090D14] hover:bg-[#1e293b] hover:border-gray-600"
                                             }`}
                                         >
                                             <div className="flex justify-between items-start">
@@ -241,9 +270,20 @@ export default function HomeServicePage() {
                             </div>
                         )}
 
-                        <div className="flex gap-3">
-                            <button onClick={() => setStep(1)} className="border border-[#1e293b] text-gray-400 px-6 py-2 rounded-md text-xs hover:text-white">Back</button>
-                            <button onClick={() => setStep(3)} disabled={!selectedService} className="bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 text-white px-6 py-2 rounded-md text-xs font-bold flex-1 transition-colors">Continue to Address & Time →</button>
+                        <div className="flex items-center gap-3 mt-6">
+                            <button
+                                onClick={() => setStep(1)}
+                                className="h-10 px-5 rounded-lg border border-[#1e293b] text-gray-300 hover:text-white hover:bg-[#1e293b] text-xs font-semibold transition-colors flex items-center justify-center"
+                            >
+                                Back
+                            </button>
+                            <button
+                                onClick={() => setStep(3)}
+                                disabled={!selectedService}
+                                className="h-10 px-6 rounded-lg bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold transition-colors flex items-center justify-center flex-1 shadow-md shadow-blue-900/20"
+                            >
+                                Continue to Address & Time →
+                            </button>
                         </div>
                     </div>
                 )}
@@ -264,7 +304,7 @@ export default function HomeServicePage() {
                                 onChange={e => setAddress(e.target.value)}
                                 rows={2}
                                 placeholder="House / Flat No., Street, Sector, City (e.g., House 42, St 14, F-8/2, Islamabad)"
-                                className="w-full p-3 bg-[#090D14] border border-[#1e293b] rounded-lg text-white text-xs outline-none focus:border-[#2563EB]"
+                                className="w-full p-2.5 bg-[#090D14] border border-[#1e293b] rounded-lg text-white text-xs outline-none focus:border-[#2563EB]"
                                 required
                             />
                         </div>
@@ -318,12 +358,18 @@ export default function HomeServicePage() {
                             )}
                         </div>
 
-                        <div className="flex gap-3">
-                            <button type="button" onClick={() => setStep(2)} className="border border-[#1e293b] text-gray-400 px-6 py-2 rounded-md text-xs hover:text-white">Back</button>
+                        <div className="flex items-center gap-3">
+                            <button
+                                type="button"
+                                onClick={() => setStep(2)}
+                                className="h-10 px-5 rounded-lg border border-[#1e293b] text-gray-300 hover:text-white hover:bg-[#1e293b] text-xs font-semibold transition-colors flex items-center justify-center"
+                            >
+                                Back
+                            </button>
                             <button
                                 type="submit"
                                 disabled={loading}
-                                className="bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 text-white px-6 py-2.5 rounded-md text-xs font-bold flex-1 transition-colors shadow-lg shadow-blue-900/20"
+                                className="h-10 px-6 rounded-lg bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold transition-colors flex items-center justify-center flex-1 shadow-md shadow-blue-900/20"
                             >
                                 {loading ? "Confirming..." : "Confirm Doorstep Booking"}
                             </button>

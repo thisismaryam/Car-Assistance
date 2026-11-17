@@ -2,15 +2,16 @@
 import { useEffect, useState } from "react";
 
 export default function MyVehiclesPage() {
-    const [vehicles, setVehicles] = useState([]);
+    const [vehicles, setVehicles] = useState<any[]>([]);
 
     useEffect(() => {
+        if (typeof window === "undefined") return;
         const token = localStorage.getItem("token");
         fetch("http://localhost:8000/vehicles/my-vehicles", {
             headers: { Authorization: `Bearer ${token}` }
         })
             .then(res => res.json())
-            .then(data => setVehicles(data));
+            .then(data => setVehicles(Array.isArray(data) ? data : []));
     }, []);
 
     return (
