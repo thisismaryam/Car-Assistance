@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -14,6 +14,15 @@ const ISSUE_OPTIONS = [
     { id: "Other Breakdown", label: "Other Mechanical Issue", desc: "Unknown noise, stalling, or steering failure" },
 ];
 
+const LIFECYCLE_STAGES = [
+    { key: "requested", label: "1. Requested" },
+    { key: "accepted", label: "2. Accepted" },
+    { key: "assigned", label: "3. Provider Assigned" },
+    { key: "en route", label: "4. En Route" },
+    { key: "arrived", label: "5. Arrived On-Site" },
+    { key: "resolved", label: "6. Resolved" },
+];
+
 export default function EmergencyPage() {
     const router = useRouter();
     const [user, setUser] = useState<any>(null);
@@ -24,9 +33,14 @@ export default function EmergencyPage() {
     const [notes, setNotes] = useState<string>("");
     const [locating, setLocating] = useState<boolean>(false);
     const [submitting, setSubmitting] = useState<boolean>(false);
-    const [successData, setSuccessData] = useState<any>(null);
+    const [activeIncident, setActiveIncident] = useState<any | null>(null);
     const [errorMsg, setErrorMsg] = useState<string>("");
+    const [wsConnected, setWsConnected] = useState<boolean>(false);
+    const [cancelling, setCancelling] = useState(false);
 
+    const wsRef = useRef<WebSocket | null>(null);
+
+    // Fetch active user and vehicles, and check for any existing active roadside incident
     useEffect(() => {
         const token = localStorage.getItem("token");
         if (!token) return;
@@ -34,8 +48,9 @@ export default function EmergencyPage() {
         const headers = { Authorization: `Bearer ${token}` };
         Promise.all([
             fetch("http://localhost:8000/auth/me", { headers }).then(r => r.ok ? r.json() : null),
-            fetch("http://localhost:8000/vehicles/my-vehicles", { headers }).then(r => r.ok ? r.json() : [])
-        ]).then(([userData, vehicleData]) => {
+            fetch("http://localhost:8000/vehicles/my-vehicles", { headers }).then(r => r.ok ? r.json() : []),
+            fetch("http://localhost:8000/roadside/my", { headers }).then(r => r.ok ? r.json() : []),
+        ]).then(([userData, vehicleData, roadsideData]) => {
             if (userData) setUser(userData);
             if (Array.isArray(vehicleData)) {
                 setVehicles(vehicleData);
@@ -43,8 +58,79 @@ export default function EmergencyPage() {
                     setSelectedVehicle(vehicleData[0].id.toString());
                 }
             }
+            if (Array.isArray(roadsideData) && roadsideData.length > 0) {
+                // Find most recent active incident that is not resolved or cancelled
+                const active = roadsideData.find(r => !["resolved", "cancelled"].includes(r.status?.toLowerCase()));
+                if (active) {
+                    setActiveIncident(active);
+                }
+            }
         }).catch(() => {});
     }, []);
+
+    // Setup live WebSocket push stream for the active incident
+    useEffect(() => {
+        if (!activeIncident?.id) return;
+        const incidentId = activeIncident.id;
+        let socket: WebSocket | null = null;
+        let reconnectTimer: any = null;
+
+        const connectCustomerWS = () => {
+            try {
+                socket = new WebSocket(`ws://localhost:8000/roadside/ws/customer/${incidentId}`);
+                wsRef.current = socket;
+
+                socket.onopen = () => {
+                    setWsConnected(true);
+                };
+
+                socket.onmessage = (event) => {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.data && msg.data.id === incidentId) {
+                            setActiveIncident(msg.data);
+                        }
+                    } catch {
+                        // ignore malformed ws messages
+                    }
+                };
+
+                socket.onclose = () => {
+                    setWsConnected(false);
+                    reconnectTimer = setTimeout(connectCustomerWS, 4000);
+                };
+
+                socket.onerror = () => {
+                    setWsConnected(false);
+                    socket?.close();
+                };
+            } catch {
+                setWsConnected(false);
+            }
+        };
+
+        connectCustomerWS();
+
+        // 5-second polling fallback
+        const pollInterval = setInterval(() => {
+            const token = localStorage.getItem("token");
+            if (!token) return;
+            fetch(`http://localhost:8000/roadside/${incidentId}`, {
+                headers: { Authorization: `Bearer ${token}` }
+            })
+                .then(res => res.ok ? res.json() : null)
+                .then(data => {
+                    if (data) setActiveIncident(data);
+                })
+                .catch(() => {});
+        }, 5000);
+
+        return () => {
+            clearInterval(pollInterval);
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            if (socket) socket.close();
+        };
+    }, [activeIncident?.id]);
 
     const handleGetLocation = () => {
         if (!navigator.geolocation) {
@@ -104,16 +190,40 @@ export default function EmergencyPage() {
             });
 
             if (!res.ok) {
-                const err = await res.json();
+                const err = await res.json().catch(() => ({}));
                 throw new Error(err.detail || "Failed to submit roadside request");
             }
 
             const data = await res.json();
-            setSuccessData(data);
+            setActiveIncident(data);
         } catch (err: any) {
             setErrorMsg(err.message || "An error occurred submitting request.");
         } finally {
             setSubmitting(false);
+        }
+    };
+
+    const handleCancelIncident = async () => {
+        if (!activeIncident) return;
+        if (!confirm("Are you sure you want to cancel this emergency roadside request?")) return;
+        const token = localStorage.getItem("token");
+        setCancelling(true);
+
+        try {
+            const res = await fetch(`http://localhost:8000/roadside/${activeIncident.id}/status`, {
+                method: "PATCH",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`
+                },
+                body: JSON.stringify({ status: "cancelled", notes: "Cancelled by customer" }),
+            });
+            if (res.ok) {
+                const updated = await res.json();
+                setActiveIncident(updated);
+            }
+        } finally {
+            setCancelling(false);
         }
     };
 
@@ -136,52 +246,140 @@ export default function EmergencyPage() {
                 </a>
             </div>
 
-            {/* Success Confirmation Card */}
-            {successData ? (
-                <div className="bg-[#151D2A] border border-[#2563EB]/40 rounded-xl p-6 md:p-8 shadow-xl">
-                    <div className="flex items-center gap-3 mb-4">
-                        <div className="w-8 h-8 rounded-full bg-[#2563EB]/20 border border-[#2563EB] flex items-center justify-center text-[#2563EB] font-bold text-sm">
-                            ✓
-                        </div>
+            {/* LIVE REAL-TIME INCIDENT TRACKING INTERFACE */}
+            {activeIncident ? (
+                <div className="bg-[#151D2A] border border-[#2563EB]/40 rounded-xl p-6 md:p-8 shadow-2xl">
+                    {/* Header */}
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-[#101827] pb-4 mb-6">
                         <div>
-                            <h2 className="text-base font-bold text-white">Roadside Request Logged & Dispatched</h2>
-                            <p className="text-xs text-gray-400 font-mono">Incident ID: #{successData.id}</p>
+                            <div className="flex items-center gap-3">
+                                <span className="w-3 h-3 rounded-full bg-red-500 animate-ping"></span>
+                                <h2 className="text-lg font-bold text-white">Active Dispatch Stream</h2>
+                                <span className="font-mono text-xs px-2.5 py-0.5 rounded bg-red-500/20 text-red-300 border border-red-500/40 font-bold">
+                                    #CA-EMERG-{activeIncident.id}
+                                </span>
+                            </div>
+                            <p className="text-xs text-gray-400 mt-1">
+                                Logged at {new Date(activeIncident.created_at).toLocaleString()}
+                            </p>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                            <span className="flex items-center gap-1.5 text-[11px] font-mono">
+                                <span className={`w-2 h-2 rounded-full ${wsConnected ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`}></span>
+                                <span className={wsConnected ? "text-emerald-400" : "text-amber-400"}>
+                                    {wsConnected ? "Live Socket Connected" : "Connecting..."}
+                                </span>
+                            </span>
                         </div>
                     </div>
 
+                    {/* 7-Step Lifecycle Timeline */}
+                    <div className="mb-8 bg-[#090D14] p-5 rounded-xl border border-[#1e293b]">
+                        <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4">Dispatch Lifecycle Status</h3>
+                        <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 text-center text-xs">
+                            {LIFECYCLE_STAGES.map((stage) => {
+                                const currentStatus = (activeIncident.status || "").toLowerCase();
+                                const isCurrent = currentStatus === stage.key || (stage.key === "requested" && currentStatus === "pending") || (stage.key === "en route" && currentStatus === "en_route");
+                                const isPassed =
+                                    (stage.key === "requested") ||
+                                    (stage.key === "accepted" && ["accepted", "assigned", "en route", "en_route", "arrived", "resolved"].includes(currentStatus)) ||
+                                    (stage.key === "assigned" && ["assigned", "en route", "en_route", "arrived", "resolved"].includes(currentStatus)) ||
+                                    (stage.key === "en route" && ["en route", "en_route", "arrived", "resolved"].includes(currentStatus)) ||
+                                    (stage.key === "arrived" && ["arrived", "resolved"].includes(currentStatus)) ||
+                                    (stage.key === "resolved" && currentStatus === "resolved");
+
+                                return (
+                                    <div
+                                        key={stage.key}
+                                        className={`p-2 rounded-lg border text-[11px] font-bold transition-all ${
+                                            isCurrent
+                                                ? "bg-[#2563EB]/20 border-[#2563EB] text-white shadow-md shadow-blue-900/30 animate-pulse"
+                                                : isPassed
+                                                ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+                                                : "bg-[#151D2A]/40 border-[#1e293b] text-gray-500"
+                                        }`}
+                                    >
+                                        <p className="truncate">{stage.label}</p>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    {/* Assigned Provider Card */}
+                    {activeIncident.assigned_mechanic ? (
+                        <div className="mb-6 bg-emerald-950/20 border border-emerald-500/40 p-4 rounded-xl flex items-center justify-between">
+                            <div>
+                                <span className="text-[10px] text-emerald-400 uppercase font-black tracking-wider block">Assigned Response Provider</span>
+                                <p className="text-sm font-bold text-white mt-0.5">✓ {activeIncident.assigned_mechanic.full_name}</p>
+                                <p className="text-xs text-gray-400 font-mono mt-0.5">Certified Roadside Technician</p>
+                            </div>
+                            <a
+                                href={`tel:${activeIncident.assigned_mechanic.phone}`}
+                                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-lg text-xs transition-colors flex items-center gap-1.5"
+                            >
+                                📞 Call Provider
+                            </a>
+                        </div>
+                    ) : (
+                        <div className="mb-6 bg-yellow-950/20 border border-yellow-500/40 p-4 rounded-xl flex items-center justify-between">
+                            <div>
+                                <span className="text-[10px] text-yellow-400 uppercase font-black tracking-wider block">Controller Queued</span>
+                                <p className="text-xs text-gray-300 mt-0.5">Operations team is assigning the closest mobile unit / flatbed...</p>
+                            </div>
+                            <span className="w-2.5 h-2.5 rounded-full bg-yellow-400 animate-ping"></span>
+                        </div>
+                    )}
+
+                    {/* Incident Details Summary */}
                     <div className="bg-[#090D14] p-4 rounded-lg border border-[#1e293b] text-xs space-y-2 mb-6">
                         <div className="flex justify-between py-1 border-b border-[#151D2A]">
-                            <span className="text-gray-400">Status</span>
-                            <span className="px-2 py-0.5 rounded font-bold uppercase bg-yellow-500/15 text-yellow-400 border border-yellow-500/30">
-                                {successData.status}
+                            <span className="text-gray-400">Current Status</span>
+                            <span className="px-2 py-0.5 rounded font-bold uppercase bg-[#2563EB]/20 text-blue-300 border border-[#2563EB]/30">
+                                {activeIncident.status}
                             </span>
                         </div>
                         <div className="flex justify-between py-1 border-b border-[#151D2A]">
-                            <span className="text-gray-400">Issue Reported</span>
-                            <span className="text-white font-semibold">{successData.issue_type}</span>
+                            <span className="text-gray-400">Reported Issue</span>
+                            <span className="text-white font-semibold">{activeIncident.issue_type}</span>
                         </div>
                         <div className="flex justify-between py-1 border-b border-[#151D2A]">
-                            <span className="text-gray-400">Incident Location</span>
-                            <span className="text-white font-mono text-right max-w-xs truncate">{successData.location}</span>
+                            <span className="text-gray-400">Live GPS Coordinates</span>
+                            <span className="text-white font-mono text-right max-w-xs truncate">{activeIncident.location}</span>
                         </div>
-                        {successData.vehicle && (
+                        {activeIncident.vehicle && (
                             <div className="flex justify-between py-1">
                                 <span className="text-gray-400">Vehicle</span>
-                                <span className="text-white">{successData.vehicle.year} {successData.vehicle.make} {successData.vehicle.model} ({successData.vehicle.registration})</span>
+                                <span className="text-white">{activeIncident.vehicle.year} {activeIncident.vehicle.make} {activeIncident.vehicle.model} ({activeIncident.vehicle.registration})</span>
+                            </div>
+                        )}
+                        {activeIncident.notes && (
+                            <div className="flex justify-between py-1 border-t border-[#151D2A]">
+                                <span className="text-gray-400">Notes</span>
+                                <span className="text-gray-300">{activeIncident.notes}</span>
                             </div>
                         )}
                     </div>
 
-                    <p className="text-xs text-gray-300 mb-6">
-                        An operations controller is reviewing your alert in the admin dashboard and a service vehicle has been routed. Keep your phone line clear.
-                    </p>
-
-                    <button
-                        onClick={() => { setSuccessData(null); setLocation(""); setNotes(""); }}
-                        className="w-full bg-[#2563EB] hover:bg-blue-700 text-white text-xs font-bold py-2.5 rounded-lg transition-colors"
-                    >
-                        Submit Another Emergency Alert
-                    </button>
+                    {/* Action Controls */}
+                    <div className="flex flex-col sm:flex-row gap-3">
+                        {activeIncident.status !== "resolved" && activeIncident.status !== "cancelled" && (
+                            <button
+                                onClick={handleCancelIncident}
+                                disabled={cancelling}
+                                className="border border-[#1e293b] hover:border-red-500 text-gray-400 hover:text-red-400 text-xs font-bold py-2.5 px-4 rounded-lg transition-colors flex-1"
+                            >
+                                {cancelling ? "Cancelling..." : "Cancel Emergency Request"}
+                            </button>
+                        )}
+                        <button
+                            onClick={() => { setActiveIncident(null); setLocation(""); setNotes(""); }}
+                            className="bg-[#2563EB] hover:bg-blue-700 text-white text-xs font-bold py-2.5 px-4 rounded-lg transition-colors flex-1"
+                        >
+                            Log New Emergency Alert
+                        </button>
+                    </div>
                 </div>
             ) : (
                 /* Emergency Request Form */
@@ -218,98 +416,96 @@ export default function EmergencyPage() {
                                 <select
                                     value={selectedVehicle}
                                     onChange={(e) => setSelectedVehicle(e.target.value)}
-                                    className="w-full p-2.5 bg-[#090D14] border border-[#1e293b] rounded-lg text-white text-xs outline-none focus:border-[#2563EB]"
+                                    className="w-full bg-[#090D14] border border-[#1e293b] text-white p-2.5 rounded-lg text-xs outline-none focus:border-[#2563EB]"
                                 >
                                     {vehicles.map((v) => (
                                         <option key={v.id} value={v.id}>
-                                            {v.year} {v.make} {v.model} — {v.registration}
+                                            {v.year} {v.make} {v.model} ({v.registration})
                                         </option>
                                     ))}
-                                    <option value="">Vehicle not in garage / driving rental</option>
                                 </select>
                             ) : (
-                                <p className="text-xs text-gray-400 bg-[#090D14] p-2.5 rounded-lg border border-[#1e293b]">
-                                    No registered vehicles found. (Vehicle can be specified in notes below)
+                                <p className="text-xs text-gray-400 p-2.5 bg-[#090D14] rounded-lg border border-[#1e293b]">
+                                    {user ? "No registered vehicles found in your garage (will submit as unregistered)." : "Log in to link your registered garage vehicle."}
                                 </p>
                             )}
                         </div>
 
-                        {/* 2. SELECT ISSUE */}
+                        {/* 2. SELECT EMERGENCY ISSUE */}
                         <div>
-                            <label className="block text-xs font-medium text-gray-300 mb-1.5">
-                                Select Breakdown Issue <span className="text-red-400">*</span>
+                            <label className="block text-xs font-medium text-gray-300 mb-2">
+                                Emergency Breakdown Issue <span className="text-red-400">*</span>
                             </label>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                                 {ISSUE_OPTIONS.map((opt) => {
                                     const isSelected = issueType === opt.id;
                                     return (
-                                        <div
+                                        <button
+                                            type="button"
                                             key={opt.id}
                                             onClick={() => setIssueType(opt.id)}
-                                            className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                                            className={`p-3 rounded-lg border text-left transition-all ${
                                                 isSelected
-                                                    ? "border-[#2563EB] bg-[#2563EB]/10"
-                                                    : "border-[#1e293b] bg-[#090D14] hover:border-gray-600"
+                                                    ? "bg-[#2563EB]/15 border-[#2563EB] text-white"
+                                                    : "bg-[#090D14] border-[#1e293b] hover:border-gray-600 text-gray-300"
                                             }`}
                                         >
                                             <p className="text-xs font-bold text-white">{opt.label}</p>
                                             <p className="text-[11px] text-gray-400 mt-0.5">{opt.desc}</p>
-                                        </div>
+                                        </button>
                                     );
                                 })}
                             </div>
                         </div>
 
-                        {/* 3. SHARE LOCATION */}
+                        {/* 3. LOCATION & GPS */}
                         <div>
                             <div className="flex justify-between items-center mb-1.5">
                                 <label className="text-xs font-medium text-gray-300">
-                                    Current Location / Highway Marker <span className="text-red-400">*</span>
+                                    Current Location / GPS Coordinates <span className="text-red-400">*</span>
                                 </label>
                                 <button
                                     type="button"
                                     onClick={handleGetLocation}
                                     disabled={locating}
-                                    className="text-xs font-bold text-[#2563EB] hover:text-blue-400 flex items-center gap-1 disabled:opacity-50"
+                                    className="text-xs font-bold text-[#2563EB] hover:underline inline-flex items-center gap-1"
                                 >
-                                    <span>📍</span>
-                                    {locating ? "Fetching GPS..." : "Share Live GPS Location"}
+                                    <span>📍</span> {locating ? "Detecting GPS..." : "Detect GPS Location"}
                                 </button>
                             </div>
                             <input
                                 type="text"
+                                placeholder="e.g. GPS: 31.5204, 74.3587 or Main Boulevard, near Shell Pump"
                                 value={location}
                                 onChange={(e) => setLocation(e.target.value)}
-                                placeholder="e.g. M-2 Motorway Km 45 southbound or Street Address / GPS coordinates"
-                                className="w-full p-2.5 bg-[#090D14] border border-[#1e293b] rounded-lg text-white text-xs outline-none focus:border-[#2563EB]"
+                                className="w-full bg-[#090D14] border border-[#1e293b] text-white p-2.5 rounded-lg text-xs outline-none focus:border-[#2563EB]"
                                 required
                             />
                         </div>
 
-                        {/* 4. DETAILS / NOTES */}
+                        {/* 4. NOTES */}
                         <div>
                             <label className="block text-xs font-medium text-gray-300 mb-1.5">
-                                Additional Details (Optional)
+                                Landmark or Breakdown Details (Optional)
                             </label>
-                            <input
-                                type="text"
+                            <textarea
+                                placeholder="e.g. Car is parked on the shoulder with hazard lights on. Left front tyre damaged."
                                 value={notes}
                                 onChange={(e) => setNotes(e.target.value)}
-                                placeholder="Car colour, passengers on board, whether car is blocking traffic"
-                                className="w-full p-2.5 bg-[#090D14] border border-[#1e293b] rounded-lg text-white text-xs outline-none focus:border-[#2563EB]"
+                                rows={3}
+                                className="w-full bg-[#090D14] border border-[#1e293b] text-white p-2.5 rounded-lg text-xs outline-none focus:border-[#2563EB]"
                             />
                         </div>
 
                         {/* SUBMIT BUTTON */}
-                        <div className="pt-2">
-                            <button
-                                type="submit"
-                                disabled={submitting}
-                                className="w-full bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold py-3 rounded-lg transition-colors shadow-lg shadow-blue-900/20"
-                            >
-                                {submitting ? "Transmitting Alert to Ops Center..." : "Dispatch Roadside Unit Now →"}
-                            </button>
-                        </div>
+                        <button
+                            type="submit"
+                            disabled={submitting}
+                            className="w-full bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold text-xs uppercase tracking-wider py-3.5 rounded-lg transition-colors shadow-lg shadow-red-950/50 flex items-center justify-center gap-2"
+                        >
+                            <span className="w-2 h-2 rounded-full bg-white animate-ping"></span>
+                            {submitting ? "Dispatching Rapid Alert..." : "Dispatch Immediate Emergency Assistance"}
+                        </button>
                     </form>
                 </div>
             )}

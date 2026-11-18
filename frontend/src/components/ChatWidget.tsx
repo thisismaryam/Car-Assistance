@@ -1,25 +1,71 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 
 interface Message {
     role: "user" | "assistant";
     content: string;
+    branch?: string;
+    booking_id?: number;
+    booking_link?: string;
 }
 
 const QUICK_PROMPTS = [
-    "What workshop services do you offer?",
-    "How does home battery replacement work?",
-    "I need emergency roadside towing",
-    "What is the daily booking limit?",
+    "What workshop services do you offer and their prices?",
+    "Check availability for Oil change tomorrow",
+    "How does 24/7 emergency roadside towing work?",
+    "Book an Oil Change for my car",
 ];
+
+function renderMessageContent(content: string) {
+    // Basic markdown link and bold parser: [text](url) and **bold**
+    const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
+    const parts = [];
+    let lastIdx = 0;
+    let match;
+
+    while ((match = linkRegex.exec(content)) !== null) {
+        if (match.index > lastIdx) {
+            parts.push(content.slice(lastIdx, match.index));
+        }
+        const linkText = match[1];
+        const linkUrl = match[2];
+        parts.push(
+            <Link
+                key={match.index}
+                href={linkUrl}
+                className="text-[#38bdf8] underline font-bold hover:text-white transition-colors"
+            >
+                {linkText}
+            </Link>
+        );
+        lastIdx = linkRegex.lastIndex;
+    }
+
+    if (lastIdx < content.length) {
+        parts.push(content.slice(lastIdx));
+    }
+
+    return (
+        <span className="whitespace-pre-line">
+            {parts.map((p, i) => (
+                typeof p === "string" ? (
+                    <span key={i} dangerouslySetInnerHTML={{
+                        __html: p.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+                    }} />
+                ) : p
+            ))}
+        </span>
+    );
+}
 
 export default function ChatWidget() {
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState<Message[]>([
         {
             role: "assistant",
-            content: "Hello! I am Car Assistance AI. Ask me anything about workshop services, doorstep home mechanics, or roadside assistance.",
+            content: "Hello! I am your Car Assistance AI. I can give you live pricing, verify real-time bay availability, look up approved policies, and schedule verified bookings for your garage.",
         },
     ]);
     const [input, setInput] = useState("");
@@ -45,10 +91,16 @@ export default function ChatWidget() {
         setInput("");
         setLoading(true);
 
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) {
+            headers["Authorization"] = `Bearer ${token}`;
+        }
+
         try {
             const res = await fetch("http://localhost:8000/api/chat", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers,
                 body: JSON.stringify({
                     message: textToSend,
                     history: newMessages.slice(-6).map((m) => ({
@@ -63,7 +115,16 @@ export default function ChatWidget() {
             }
 
             const data = await res.json();
-            setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
+            setMessages((prev) => [
+                ...prev,
+                {
+                    role: "assistant",
+                    content: data.reply,
+                    branch: data.branch,
+                    booking_id: data.booking_id,
+                    booking_link: data.booking_link,
+                },
+            ]);
         } catch {
             setMessages((prev) => [
                 ...prev,
@@ -81,7 +142,7 @@ export default function ChatWidget() {
         <div className="fixed bottom-5 right-5 z-50">
             {/* Chat Box Window */}
             {isOpen && (
-                <div className="w-[340px] sm:w-[380px] h-[500px] bg-[#090D14] border border-[#1e293b] rounded-2xl shadow-2xl flex flex-col overflow-hidden mb-3 animate-in fade-in slide-in-from-bottom-2">
+                <div className="w-[340px] sm:w-[400px] h-[520px] bg-[#090D14] border border-[#1e293b] rounded-2xl shadow-2xl flex flex-col overflow-hidden mb-3 animate-in fade-in slide-in-from-bottom-2">
                     {/* Header */}
                     <div className="bg-[#151D2A] border-b border-[#1e293b] px-4 py-3 flex items-center justify-between">
                         <div className="flex items-center gap-2.5">
@@ -93,36 +154,55 @@ export default function ChatWidget() {
                                     <h3 className="text-xs font-bold text-white">Car Assistance AI</h3>
                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
                                 </div>
-                                <p className="text-[10px] text-gray-400">Workshop · Home · Roadside</p>
+                                <p className="text-[10px] text-gray-400">RAG Knowledge · Live Tools · Real Bookings</p>
                             </div>
                         </div>
                         <button
                             onClick={() => setIsOpen(false)}
-                            className="text-gray-400 hover:text-white text-xs p-1 rounded-md transition-colors"
-                            aria-label="Close chat"
+                            className="text-gray-400 hover:text-white text-xs p-1 rounded hover:bg-[#1e293b] transition-colors"
                         >
                             ✕
                         </button>
                     </div>
 
                     {/* Messages Body */}
-                    <div className="flex-1 overflow-y-auto p-3.5 space-y-3 text-xs bg-[#090D14]">
+                    <div className="flex-1 overflow-y-auto p-4 space-y-3 text-xs">
                         {messages.map((m, idx) => {
                             const isUser = m.role === "user";
                             return (
                                 <div
                                     key={idx}
-                                    className={`flex ${isUser ? "justify-end" : "justify-start"}`}
+                                    className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}
                                 >
                                     <div
-                                        className={`max-w-[82%] px-3.5 py-2.5 rounded-xl leading-relaxed ${
+                                        className={`max-w-[85%] px-3.5 py-2.5 rounded-xl leading-relaxed ${
                                             isUser
                                                 ? "bg-[#2563EB] text-white rounded-br-xs font-medium"
                                                 : "bg-[#151D2A] text-[#E8EDF5] border border-[#1e293b] rounded-bl-xs"
                                         }`}
                                     >
-                                        {m.content}
+                                        {renderMessageContent(m.content)}
+
+                                        {/* Direct Booking Button if booking was created */}
+                                        {m.booking_link && (
+                                            <div className="mt-3 pt-2.5 border-t border-[#1e293b]">
+                                                <Link
+                                                    href={m.booking_link}
+                                                    onClick={() => setIsOpen(false)}
+                                                    className="inline-block w-full text-center bg-[#2563EB] hover:bg-blue-600 text-white font-bold py-1.5 px-3 rounded-lg text-[11px] transition-colors shadow-sm"
+                                                >
+                                                    View Verified Booking #{m.booking_id} →
+                                                </Link>
+                                            </div>
+                                        )}
                                     </div>
+
+                                    {/* Operational Branch Tag */}
+                                    {m.branch && (
+                                        <span className="text-[9px] text-gray-500 mt-0.5 px-1 font-mono uppercase">
+                                            {m.branch === "grounded_rag" ? "📘 Grounded RAG" : m.branch === "live_backend_tool" ? "⚡ Live Backend Tool" : "🛡️ Core Booking Flow"}
+                                        </span>
+                                    )}
                                 </div>
                             );
                         })}
@@ -133,21 +213,21 @@ export default function ChatWidget() {
                                     <span className="w-1.5 h-1.5 bg-[#2563EB] rounded-full animate-bounce"></span>
                                     <span className="w-1.5 h-1.5 bg-[#2563EB] rounded-full animate-bounce [animation-delay:0.2s]"></span>
                                     <span className="w-1.5 h-1.5 bg-[#2563EB] rounded-full animate-bounce [animation-delay:0.4s]"></span>
-                                    <span className="text-[11px] ml-1">Thinking...</span>
+                                    <span className="text-[11px] ml-1">Executing backend tool / retrieval...</span>
                                 </div>
                             </div>
                         )}
                         <div ref={messagesEndRef} />
                     </div>
 
-                    {/* Quick suggestion pills (only when conversation is short) */}
+                    {/* Quick suggestion pills */}
                     {messages.length <= 2 && (
                         <div className="px-3 py-2 bg-[#090D14] border-t border-[#1e293b]/50 flex flex-wrap gap-1.5">
-                            {QUICK_PROMPTS.slice(0, 3).map((prompt, i) => (
+                            {QUICK_PROMPTS.map((prompt, i) => (
                                 <button
                                     key={i}
                                     onClick={() => handleSend(prompt)}
-                                    className="text-[10px] bg-[#151D2A] hover:bg-[#1e293b] text-gray-300 border border-[#1e293b] px-2 py-1 rounded-md transition-colors"
+                                    className="text-[10px] bg-[#151D2A] hover:bg-[#1e293b] text-gray-300 border border-[#1e293b] px-2 py-1 rounded-md transition-colors text-left"
                                 >
                                     {prompt}
                                 </button>
@@ -165,15 +245,16 @@ export default function ChatWidget() {
                     >
                         <input
                             type="text"
+                            placeholder="Ask prices, check slots, or book a service..."
                             value={input}
                             onChange={(e) => setInput(e.target.value)}
-                            placeholder="Ask about workshop, home or emergency..."
-                            className="flex-1 bg-[#090D14] border border-[#1e293b] rounded-lg px-3 py-2 text-xs text-[#E8EDF5] placeholder-gray-500 outline-none focus:border-[#2563EB] transition-colors"
+                            disabled={loading}
+                            className="flex-1 bg-[#090D14] text-white text-xs px-3 py-2 rounded-lg border border-[#1e293b] focus:outline-none focus:border-[#2563EB] transition-colors"
                         />
                         <button
                             type="submit"
-                            disabled={!input.trim() || loading}
-                            className="bg-[#2563EB] hover:bg-blue-700 disabled:opacity-40 text-white text-xs font-bold px-3 py-2 rounded-lg transition-colors"
+                            disabled={loading || !input.trim()}
+                            className="bg-[#2563EB] hover:bg-blue-600 disabled:opacity-40 text-white px-3.5 py-2 rounded-lg text-xs font-bold transition-all shadow-sm flex items-center justify-center"
                         >
                             Send
                         </button>
@@ -181,21 +262,21 @@ export default function ChatWidget() {
                 </div>
             )}
 
-            {/* Floating Action Button */}
+            {/* Toggle Button */}
             <button
                 onClick={() => setIsOpen(!isOpen)}
-                className="w-12 h-12 rounded-full bg-[#2563EB] hover:bg-blue-700 text-white flex items-center justify-center shadow-lg shadow-blue-900/40 hover:scale-105 active:scale-95 transition-all focus:outline-none"
-                aria-label="Toggle Car Assistance AI Chat"
+                className="bg-[#2563EB] hover:bg-blue-600 text-white p-3.5 rounded-full shadow-2xl flex items-center gap-2 border border-blue-400/30 transition-all hover:scale-105"
+                title="Car Assistance AI Assistant"
             >
-                {isOpen ? (
-                    <span className="text-sm font-bold">✕</span>
-                ) : (
-                    <div className="flex flex-col items-center justify-center leading-none">
-                        <span className="text-[15px]">💬</span>
-                    </div>
+                <div className="w-5 h-5 flex items-center justify-center font-black text-xs">
+                    💬
+                </div>
+                {!isOpen && (
+                    <span className="text-xs font-bold pr-1 hidden sm:inline">
+                        AI Assistant
+                    </span>
                 )}
             </button>
         </div>
     );
 }
-

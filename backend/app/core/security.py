@@ -49,6 +49,24 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 
+def get_optional_current_user(
+    token: str | None = Depends(OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)),
+    db: Session = Depends(get_db)
+):
+    if not token:
+        return None
+    try:
+        from app.models.user import User
+        payload = decode_token(token)
+        user_id = payload.get("sub")
+        if user_id is None:
+            return None
+        return db.query(User).filter(User.id == int(user_id), User.is_active == True).first()
+    except Exception:
+        return None
+
+
+
 def require_admin(current_user=Depends(get_current_user)):
     from app.models.user import UserRole
     if current_user.role != UserRole.ADMIN:

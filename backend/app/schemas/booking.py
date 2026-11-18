@@ -45,6 +45,7 @@ class BookingRead(BaseModel):
     customer_id: int
     vehicle_id: int
     service_id: int
+    mechanic_id: int | None = None
     status: BookingStatus
     scheduled_at: datetime
     address: str | None
@@ -55,6 +56,7 @@ class BookingRead(BaseModel):
     customer: UserRead
     vehicle: VehicleRead
     service: ServiceRead
+    mechanic: UserRead | None = None
 
 
 class StatusUpdate(BaseModel):

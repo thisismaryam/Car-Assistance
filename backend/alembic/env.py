@@ -2,6 +2,7 @@ import app.models.booking
 import app.models.vehicle
 import app.models.user
 import app.models.roadside
+import app.models.mechanic
 from app.core.config import settings
 from app.database import Base
 from logging.config import fileConfig

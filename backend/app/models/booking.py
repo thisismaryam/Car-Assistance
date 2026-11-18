@@ -50,9 +50,11 @@ class Booking(Base):
         ForeignKey("vehicles.id"), index=True)
     service_id: Mapped[int] = mapped_column(
         ForeignKey("services.id"), index=True)
+    mechanic_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     status: Mapped[BookingStatus] = mapped_column(
         default=BookingStatus.PENDING, index=True)
-    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -60,6 +62,9 @@ class Booking(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    customer: Mapped["User"] = relationship(back_populates="bookings")
+    customer: Mapped["User"] = relationship(
+        "User", foreign_keys=[customer_id], back_populates="bookings")
+    mechanic: Mapped["User | None"] = relationship(
+        "User", foreign_keys=[mechanic_id], back_populates="assigned_bookings")
     vehicle: Mapped["Vehicle"] = relationship(back_populates="bookings")
     service: Mapped["Service"] = relationship(back_populates="bookings")

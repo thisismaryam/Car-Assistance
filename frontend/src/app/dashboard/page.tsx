@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 export default function DashboardPage() {
     const router = useRouter();
@@ -13,12 +14,42 @@ export default function DashboardPage() {
     const [step, setStep] = useState(1);
     const [selectedVehicle, setSelectedVehicle] = useState("");
     const [selectedService, setSelectedService] = useState("");
+    const [selectedDay, setSelectedDay] = useState("");
+    const [slots, setSlots] = useState<any[]>([]);
+    const [loadingSlots, setLoadingSlots] = useState(false);
     const [date, setDate] = useState("");
     const [message, setMessage] = useState("");
 
     // Add Vehicle Form State
     const [showAddCar, setShowAddCar] = useState(false);
     const [newCar, setNewCar] = useState({ make: "", model: "", year: "", registration: "" });
+    const [confirmedBooking, setConfirmedBooking] = useState<any | null>(null);
+    const [submitting, setSubmitting] = useState(false);
+
+    const fetchSlots = (dayStr: string, sId: string) => {
+        if (!sId || !dayStr) return;
+        setLoadingSlots(true);
+        fetch(`http://localhost:8000/bookings/availability?service_id=${sId}&date=${dayStr}`)
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (data && Array.isArray(data.slots)) {
+                    setSlots(data.slots);
+                } else {
+                    setSlots([]);
+                }
+            })
+            .catch(() => setSlots([]))
+            .finally(() => setLoadingSlots(false));
+    };
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        if (step === 3 && selectedService) {
+            const todayStr = selectedDay || new Date().toISOString().split("T")[0];
+            if (!selectedDay) setSelectedDay(todayStr);
+            fetchSlots(todayStr, selectedService);
+        }
+    }, [step, selectedDay, selectedService]);
 
     const fetchData = () => {
         const token = localStorage.getItem("token");
@@ -73,6 +104,7 @@ export default function DashboardPage() {
     const handleBook = async (e: React.FormEvent) => {
         e.preventDefault();
         setMessage("");
+        setSubmitting(true);
         const token = localStorage.getItem("token");
 
         try {
@@ -87,13 +119,23 @@ export default function DashboardPage() {
             });
 
             if (!res.ok) {
-                const errorData = await res.json();
+                const errorData = await res.json().catch(() => ({}));
                 throw new Error(errorData.detail || "Failed to book");
             }
-            setMessage("Booking confirmed successfully!");
-            setStep(1); // Reset wizard
+
+            const confirmed = await res.json();
+            // FEATURE 6: Prevent any success response or redirection link from being generated
+            // until backend database creation is fully confirmed with valid ID
+            if (!confirmed || typeof confirmed.id !== "number") {
+                throw new Error("Server error: database record confirmation was not returned.");
+            }
+
+            setConfirmedBooking(confirmed);
+            setMessage("");
         } catch (err: any) {
             setMessage(`Error: ${err.message}`);
+        } finally {
+            setSubmitting(false);
         }
     };
 
@@ -117,7 +159,62 @@ export default function DashboardPage() {
             {/* Booking Wizard Container */}
             <div className="bg-[#151D2A] border border-[#1e293b] rounded-xl p-6 md:p-8 shadow-xl">
 
-                {/* Step Progress Bar - Clean & Professional */}
+                {/* FEATURE 6: Confirmed Booking Direct View Card */}
+                {confirmedBooking ? (
+                    <div className="py-6 text-center">
+                        <div className="w-12 h-12 bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 rounded-full flex items-center justify-center mx-auto mb-4 text-xl font-bold">
+                            ✓
+                        </div>
+                        <h2 className="text-xl font-bold text-white mb-1">Booking Confirmed in Database!</h2>
+                        <p className="text-xs text-gray-400 mb-6">
+                            Verified reference ID: <span className="font-mono text-white font-bold">#{confirmedBooking.id}</span>
+                        </p>
+
+                        <div className="bg-[#090D14] border border-[#1e293b] rounded-xl p-5 max-w-md mx-auto mb-6 text-left text-xs">
+                            <div className="flex justify-between py-1.5 border-b border-[#151D2A]">
+                                <span className="text-gray-400">Service</span>
+                                <span className="text-white font-semibold">{confirmedBooking.service?.name}</span>
+                            </div>
+                            <div className="flex justify-between py-1.5 border-b border-[#151D2A]">
+                                <span className="text-gray-400">Vehicle</span>
+                                <span className="text-white font-semibold">
+                                    {confirmedBooking.vehicle?.year} {confirmedBooking.vehicle?.make} {confirmedBooking.vehicle?.model}
+                                </span>
+                            </div>
+                            <div className="flex justify-between py-1.5 border-b border-[#151D2A]">
+                                <span className="text-gray-400">Scheduled Time</span>
+                                <span className="text-white font-mono">
+                                    {new Date(confirmedBooking.scheduled_at).toLocaleString()}
+                                </span>
+                            </div>
+                            <div className="flex justify-between py-1.5">
+                                <span className="text-gray-400">Initial Status</span>
+                                <span className="text-blue-400 font-bold uppercase">{confirmedBooking.status}</span>
+                            </div>
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row justify-center gap-3 max-w-md mx-auto">
+                            <Link
+                                href={`/dashboard/bookings/${confirmedBooking.id}`}
+                                className="bg-[#2563EB] hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg text-xs font-bold transition-all shadow-md shadow-blue-900/30 flex-1 text-center"
+                            >
+                                View Verified Booking Record →
+                            </Link>
+                            <button
+                                onClick={() => {
+                                    setConfirmedBooking(null);
+                                    setStep(1);
+                                    setDate("");
+                                }}
+                                className="border border-[#1e293b] hover:border-gray-500 text-gray-300 px-4 py-2.5 rounded-lg text-xs font-semibold transition-colors text-center"
+                            >
+                                Book Another Service
+                            </button>
+                        </div>
+                    </div>
+                ) : (
+                    <>
+                        {/* Step Progress Bar - Clean & Professional */}
                 <div className="mb-8">
                     <div className="flex items-center justify-between text-xs font-semibold mb-2">
                         <span className={step >= 1 ? "text-[#2563EB]" : "text-gray-500"}>1. Vehicle</span>
@@ -268,18 +365,77 @@ export default function DashboardPage() {
                 {/* STEP 3: DATE & CONFIRM */}
                 {step === 3 && (
                     <form onSubmit={handleBook}>
-                        <h2 className="text-base font-bold text-white mb-2">Step 3: Schedule Date & Confirm</h2>
-                        <p className="text-xs text-gray-400 mb-6">Select your preferred workshop arrival slot.</p>
+                        <h2 className="text-base font-bold text-white mb-2">Step 3: Schedule Date & Available Bay Slot</h2>
+                        <p className="text-xs text-gray-400 mb-6">Real-time workshop capacity directly verified against live bay availability.</p>
 
-                        <div className="mb-6">
-                            <label className="block text-xs font-medium text-gray-300 mb-1.5">Select Date and Time <span className="text-red-400">*</span></label>
+                        {/* Date Picker */}
+                        <div className="mb-4">
+                            <label className="block text-xs font-medium text-gray-300 mb-1.5">Select Appointment Date <span className="text-red-400">*</span></label>
                             <input
-                                type="datetime-local"
-                                value={date}
-                                onChange={e => setDate(e.target.value)}
+                                type="date"
+                                value={selectedDay}
+                                min={new Date().toISOString().split("T")[0]}
+                                onChange={e => {
+                                    setSelectedDay(e.target.value);
+                                    setDate("");
+                                }}
                                 className="w-full p-2.5 bg-[#090D14] border border-[#1e293b] rounded-lg text-white text-xs outline-none focus:border-[#2563EB]"
                                 required
                             />
+                        </div>
+
+                        {/* Real-time Slots Grid */}
+                        <div className="mb-6">
+                            <label className="block text-xs font-medium text-gray-300 mb-1.5">
+                                Select Available Workshop Bay Slot (09:00 - 18:00 UTC) <span className="text-red-400">*</span>
+                            </label>
+
+                            {loadingSlots ? (
+                                <p className="text-xs text-gray-400 py-3 bg-[#090D14] p-3 rounded-lg border border-[#1e293b]">Checking real-time bay capacity...</p>
+                            ) : slots.length === 0 ? (
+                                <p className="text-xs text-gray-400 py-3 bg-[#090D14] p-3 rounded-lg border border-[#1e293b]">Please select an appointment date above to view slots.</p>
+                            ) : (
+                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-48 overflow-y-auto p-1 bg-[#090D14] rounded-lg border border-[#1e293b]">
+                                    {slots.map((s: any, idx: number) => {
+                                        const startTimeStr = new Date(s.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
+                                        const endTimeStr = new Date(s.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
+                                        const isSelected = date === s.start_time;
+
+                                        if (!s.is_available) {
+                                            return (
+                                                <div
+                                                    key={idx}
+                                                    className="p-2 rounded border border-[#1e293b]/60 bg-[#101827]/40 text-gray-500 opacity-60 text-center cursor-not-allowed"
+                                                    title={s.reason}
+                                                >
+                                                    <p className="text-[11px] font-mono">{startTimeStr} - {endTimeStr}</p>
+                                                    <span className="text-[9px] text-red-400/80 uppercase font-bold block mt-0.5">
+                                                        {s.reason.includes("lead time") ? "< 2h lead" : s.reason.includes("past") ? "Past" : "Full"}
+                                                    </span>
+                                                </div>
+                                            );
+                                        }
+
+                                        return (
+                                            <button
+                                                type="button"
+                                                key={idx}
+                                                onClick={() => setDate(s.start_time)}
+                                                className={`p-2 rounded border text-center transition-all ${
+                                                    isSelected
+                                                        ? "border-[#2563EB] bg-[#2563EB]/20 text-white"
+                                                        : "border-[#1e293b] bg-[#151D2A] hover:bg-[#1e293b] text-gray-300"
+                                                }`}
+                                            >
+                                                <p className="text-[11px] font-mono font-bold">{startTimeStr} - {endTimeStr} UTC</p>
+                                                <span className="text-[9px] text-[#2563EB] font-semibold block mt-0.5">
+                                                    {s.remaining_capacity} bay{s.remaining_capacity > 1 ? "s" : ""} open
+                                                </span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            )}
                         </div>
 
                         <div className="bg-[#090D14] p-4 rounded-lg border border-[#1e293b] mb-6 text-xs">
@@ -291,6 +447,10 @@ export default function DashboardPage() {
                             <div className="flex justify-between items-center py-1 border-b border-[#151D2A]">
                                 <span className="text-gray-400">Service</span>
                                 <span className="text-white font-semibold">{services.find((s: any) => s.id.toString() === selectedService)?.name}</span>
+                            </div>
+                            <div className="flex justify-between items-center py-1 border-b border-[#151D2A]">
+                                <span className="text-gray-400">Selected Slot</span>
+                                <span className="text-white font-mono">{date ? new Date(date).toUTCString() : "Please choose a slot above"}</span>
                             </div>
                             <div className="flex justify-between items-center py-1">
                                 <span className="text-gray-400">Base Price</span>
@@ -308,12 +468,15 @@ export default function DashboardPage() {
                             </button>
                             <button
                                 type="submit"
-                                className="h-10 px-6 rounded-lg bg-[#2563EB] hover:bg-blue-700 text-white text-xs font-bold transition-colors flex items-center justify-center flex-1 shadow-md shadow-blue-900/20"
+                                disabled={!date}
+                                className="h-10 px-6 rounded-lg bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold transition-colors flex items-center justify-center flex-1 shadow-md shadow-blue-900/20"
                             >
                                 Confirm Booking
                             </button>
                         </div>
                     </form>
+                )}
+                    </>
                 )}
 
             </div>
