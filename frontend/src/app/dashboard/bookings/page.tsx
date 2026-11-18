@@ -31,7 +31,7 @@ export default function MyBookingsPage() {
                     <p className="text-xs text-gray-400 mt-1">Review your scheduled appointments and verified details</p>
                 </div>
                 <Link
-                    href="/dashboard"
+                    href="/services"
                     className="bg-[#2563EB] hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all"
                 >
                     + Book New Service
@@ -44,7 +44,7 @@ export default function MyBookingsPage() {
                 <div className="p-12 text-center bg-[#151D2A] border border-[#1e293b] rounded-xl">
                     <p className="text-gray-400 text-sm mb-4">You have no bookings yet.</p>
                     <Link
-                        href="/dashboard"
+                        href="/services"
                         className="text-xs text-[#2563EB] font-bold hover:underline"
                     >
                         Schedule your first service →

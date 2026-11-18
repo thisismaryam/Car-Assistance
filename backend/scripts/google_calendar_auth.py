@@ -1,5 +1,5 @@
 """
-One-time helper: gets the refresh token for your BUSINESS Google account.
+One-time helper to get a refresh token for your business Google account.
 
 Run from the backend folder, signed in to the business Google account in your browser:
 

@@ -165,7 +165,7 @@ export default function MyBookingsPage() {
                         </button>
                     )}
                     <Link
-                        href="/dashboard"
+                        href="/services"
                         className="bg-[#2563EB] hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-xs font-bold transition-all"
                     >
                         + Book New Service
@@ -222,7 +222,7 @@ export default function MyBookingsPage() {
             ) : bookings.length === 0 ? (
                 <div className="p-12 text-center bg-[#151D2A] border border-[#1e293b] rounded-xl">
                     <p className="text-gray-400 text-sm mb-4">You have no bookings yet.</p>
-                    <Link href="/dashboard" className="text-xs text-[#2563EB] font-bold hover:underline">
+                    <Link href="/services" className="text-xs text-[#2563EB] font-bold hover:underline">
                         Schedule your first service →
                     </Link>
                 </div>

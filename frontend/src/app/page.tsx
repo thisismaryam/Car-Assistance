@@ -6,7 +6,7 @@ const services = [
         title: "Precision, in person.",
         description: "Scheduled maintenance and expert repairs, carried out by technicians who know your vehicle.",
         link: "Book a workshop visit",
-        href: "/dashboard",
+        href: "/dashboard/workshop",
     },
     {
         number: "02 / AT YOUR DOOR",
@@ -40,7 +40,7 @@ export default function Home() {
                         at our workshop, at your door, or wherever the road takes you.
                     </p>
                     <div className="home-actions">
-                        <Link href="/dashboard" className="button-steel">
+                        <Link href="/services" className="button-steel">
                             Book a service <span aria-hidden="true">&nbsp;↗</span>
                         </Link>
                         <Link href="/emergency" className="button-outline">

@@ -73,7 +73,13 @@ export default function ServicesPage() {
                                     <p className="mt-1 text-sm font-semibold text-[#8DA6B8]">Rs. {service.base_price}</p>
                                 </div>
                                 <Link
-                                    href={service.service_type === "home" ? "/dashboard/home-service" : "/dashboard"}
+                                    href={
+                                        service.service_type === "home"
+                                            ? "/dashboard/home-service"
+                                            : service.service_type === "roadside"
+                                                ? "/emergency"
+                                                : "/dashboard/workshop"
+                                    }
                                     className="text-[10px] font-bold uppercase tracking-widests[0.1em] text-white hover:text-[#8DA6B8]"
                                 >
                                     Book service ↗

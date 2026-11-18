@@ -1,4 +1,4 @@
-"""bookings.google_event_id for Google Calendar invitations
+"""Persist Google Calendar event IDs on bookings.
 
 Revision ID: c5e8a1d2f4b7
 Revises: b4dfb1c8ebe8
@@ -17,8 +17,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column('bookings', sa.Column('google_event_id', sa.String(length=255), nullable=True))
+    op.add_column(
+        "bookings",
+        sa.Column("google_event_id", sa.String(length=255), nullable=True),
+    )
 
 
 def downgrade() -> None:
-    op.drop_column('bookings', 'google_event_id')
+    op.drop_column("bookings", "google_event_id")

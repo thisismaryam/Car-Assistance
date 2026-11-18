@@ -111,7 +111,6 @@ def create_booking_event(booking, customer, service, vehicle) -> str | None:
     except Exception as exc:  # never break a booking over the calendar
         logger.warning(
             "Google Calendar invite failed for booking #%s: %s", booking.id, exc)
-        print(f"[GOOGLE CALENDAR ERROR] booking #{booking.id}: {exc}")
         return None
 
 
@@ -133,5 +132,4 @@ def delete_booking_event(event_id: str | None) -> bool:
             return True
         logger.warning(
             "Google Calendar delete failed for event %s: %s", event_id, exc)
-        print(f"[GOOGLE CALENDAR ERROR] delete {event_id}: {exc}")
         return False

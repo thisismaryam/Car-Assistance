@@ -4,6 +4,13 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
+type AvailabilitySlot = {
+    start_time: string;
+    end_time: string;
+    is_available: boolean;
+    reason: string;
+};
+
 export default function HomeServicePage() {
     const router = useRouter();
 
@@ -22,9 +29,12 @@ export default function HomeServicePage() {
     const [services, setServices] = useState<any[]>([]);
     const [step, setStep] = useState(1);
     const [selectedService, setSelectedService] = useState("");
-    const [selectedDay, setSelectedDay] = useState("");
-    const [slots, setSlots] = useState<any[]>([]);
+    const [selectedDay, setSelectedDay] = useState(
+        () => new Date().toISOString().split("T")[0],
+    );
+    const [slots, setSlots] = useState<AvailabilitySlot[]>([]);
     const [loadingSlots, setLoadingSlots] = useState(false);
+    const [availabilityError, setAvailabilityError] = useState("");
     const [date, setDate] = useState("");
     const [address, setAddress] = useState("");
     const [notes, setNotes] = useState("");
@@ -48,28 +58,46 @@ export default function HomeServicePage() {
             .catch(() => setServices([]));
     }, []);
 
-    const fetchSlots = (dayStr: string, sId: string) => {
-        if (!sId || !dayStr) return;
-        setLoadingSlots(true);
-        fetch(`http://localhost:8000/bookings/availability?service_id=${sId}&date=${dayStr}`)
-            .then((res) => (res.ok ? res.json() : null))
-            .then((data) => {
-                if (data && Array.isArray(data.slots)) {
-                    setSlots(data.slots);
-                } else {
-                    setSlots([]);
-                }
-            })
-            .catch(() => setSlots([]))
-            .finally(() => setLoadingSlots(false));
-    };
-
     useEffect(() => {
-        if (step === 3 && selectedService) {
-            const todayStr = selectedDay || new Date().toISOString().split("T")[0];
-            if (!selectedDay) setSelectedDay(todayStr);
-            fetchSlots(todayStr, selectedService);
-        }
+        if (step !== 3 || !selectedService || !selectedDay) return;
+
+        const controller = new AbortController();
+        const loadSlots = async () => {
+            setLoadingSlots(true);
+            setSlots([]);
+            setAvailabilityError("");
+
+            try {
+                const params = new URLSearchParams({
+                    service_id: selectedService,
+                    date: selectedDay,
+                });
+                const response = await fetch(
+                    `http://localhost:8000/bookings/availability?${params}`,
+                    { signal: controller.signal },
+                );
+                const data = await response.json().catch(() => null);
+
+                if (!response.ok) {
+                    throw new Error(data?.detail || "Could not load appointment times.");
+                }
+                if (!data || !Array.isArray(data.slots)) {
+                    throw new Error("The availability response was invalid. Please try again.");
+                }
+
+                setSlots(data.slots);
+            } catch (error) {
+                if (controller.signal.aborted) return;
+                setAvailabilityError(
+                    error instanceof Error ? error.message : "Could not load appointment times.",
+                );
+            } finally {
+                if (!controller.signal.aborted) setLoadingSlots(false);
+            }
+        };
+
+        void loadSlots();
+        return () => controller.abort();
     }, [step, selectedDay, selectedService]);
 
     const handleStep1Submit = (e: React.FormEvent) => {
@@ -380,7 +408,11 @@ export default function HomeServicePage() {
                                             return (
                                                 <div
                                                     key={s.id}
-                                                    onClick={() => setSelectedService(s.id.toString())}
+                                                    onClick={() => {
+                                                        const serviceId = s.id.toString();
+                                                        if (serviceId !== selectedService) setDate("");
+                                                        setSelectedService(serviceId);
+                                                    }}
                                                     className={`p-4 rounded-lg border cursor-pointer transition-all ${isSelected
                                                             ? "border-[#2563EB] bg-[#2563EB]/15"
                                                             : "border-[#1e293b] bg-[#090D14] hover:bg-[#1e293b] hover:border-gray-600"
@@ -444,15 +476,21 @@ export default function HomeServicePage() {
 
                                 <div className="mb-4">
                                     <label className="block text-xs font-medium text-gray-300 mb-1.5">
-                                        Select Appointment Date <span className="text-red-400">*</span>
+                                        Select Appointment Date (UTC) <span className="text-red-400">*</span>
                                     </label>
                                     <input
                                         type="date"
                                         value={selectedDay}
                                         min={new Date().toISOString().split("T")[0]}
                                         onChange={(e) => {
-                                            setSelectedDay(e.target.value);
+                                            const day = e.target.value;
+                                            setSelectedDay(day);
                                             setDate("");
+                                            if (!day) {
+                                                setSlots([]);
+                                                setLoadingSlots(false);
+                                                setAvailabilityError("");
+                                            }
                                         }}
                                         className="w-full p-2.5 bg-[#090D14] border border-[#1e293b] rounded-lg text-white text-xs outline-none focus:border-[#2563EB]"
                                         required
@@ -467,46 +505,60 @@ export default function HomeServicePage() {
 
                                     {loadingSlots ? (
                                         <p className="text-xs text-gray-400 py-3 bg-[#090D14] p-3 rounded-lg border border-[#1e293b]">Checking technician availability...</p>
+                                    ) : availabilityError ? (
+                                        <p role="alert" className="text-xs text-red-300 py-3 bg-red-950/30 p-3 rounded-lg border border-red-900/50">
+                                            {availabilityError}
+                                        </p>
                                     ) : slots.length === 0 ? (
-                                        <p className="text-xs text-gray-400 py-3 bg-[#090D14] p-3 rounded-lg border border-[#1e293b]">Select an appointment date above to view slots.</p>
+                                        <p className="text-xs text-gray-400 py-3 bg-[#090D14] p-3 rounded-lg border border-[#1e293b]">
+                                            No appointment times are available for this date.
+                                        </p>
                                     ) : (
-                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-56 overflow-y-auto p-1 bg-[#090D14] rounded-lg border border-[#1e293b]">
-                                            {slots.map((s: any, idx: number) => {
-                                                const start = new Date(s.start_time);
-                                                const end = new Date(s.end_time);
-                                                const startTimeStr = start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
-                                                const endTimeStr = end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
-                                                const isSelected = date === s.start_time;
+                                        <div>
+                                            {!slots.some((slot) => slot.is_available) && (
+                                                <p className="text-xs text-amber-200/80 mb-2">
+                                                    No bookable times are available on this date. Unavailable times are shown for reference.
+                                                </p>
+                                            )}
+                                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-56 overflow-y-auto p-1 bg-[#090D14] rounded-lg border border-[#1e293b]">
+                                                {slots.map((s, idx) => {
+                                                    const start = new Date(s.start_time);
+                                                    const end = new Date(s.end_time);
+                                                    const startTimeStr = start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
+                                                    const endTimeStr = end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
+                                                    const isSelected = date === s.start_time;
+                                                    const reason = s.reason.toLowerCase();
 
-                                                if (!s.is_available) {
+                                                    if (!s.is_available) {
+                                                        return (
+                                                            <div
+                                                                key={idx}
+                                                                className="p-2.5 rounded border border-[#1e293b]/60 bg-[#101827]/40 text-gray-500 opacity-60 text-center cursor-not-allowed"
+                                                                title={s.reason}
+                                                            >
+                                                                <p className="text-xs font-mono">{startTimeStr} - {endTimeStr} UTC</p>
+                                                                <span className="text-[9px] text-red-400/80 uppercase font-bold block mt-0.5">
+                                                                    {reason.includes("lead time") ? "Lead time" : reason.includes("past") ? "Past" : reason.includes("booked") ? "Booked" : "Unavailable"}
+                                                                </span>
+                                                            </div>
+                                                        );
+                                                    }
+
                                                     return (
-                                                        <div
+                                                        <button
+                                                            type="button"
                                                             key={idx}
-                                                            className="p-2.5 rounded border border-[#1e293b]/60 bg-[#101827]/40 text-gray-500 opacity-60 text-center cursor-not-allowed"
-                                                            title={s.reason}
-                                                        >
-                                                            <p className="text-xs font-mono">{startTimeStr} - {endTimeStr} UTC</p>
-                                                            <span className="text-[9px] text-red-400/80 uppercase font-bold block mt-0.5">
-                                                                {s.reason.includes("lead time") ? "< 2h lead" : s.reason.includes("past") ? "Past" : "Booked"}
-                                                            </span>
-                                                        </div>
-                                                    );
-                                                }
-
-                                                return (
-                                                    <button
-                                                        type="button"
-                                                        key={idx}
-                                                        onClick={() => setDate(s.start_time)}
-                                                        className={`p-2.5 rounded border text-center transition-all ${isSelected
+                                                            onClick={() => setDate(s.start_time)}
+                                                            className={`p-2.5 rounded border text-center transition-all ${isSelected
                                                                 ? "border-[#2563EB] bg-[#2563EB]/20 text-white font-bold"
                                                                 : "border-[#1e293b] bg-[#151D2A] hover:bg-[#1e293b] text-gray-300"
                                                             }`}
-                                                    >
-                                                        <p className="text-xs font-mono font-medium">{startTimeStr} - {endTimeStr} UTC</p>
-                                                    </button>
-                                                );
-                                            })}
+                                                        >
+                                                            <p className="text-xs font-mono font-medium">{startTimeStr} - {endTimeStr} UTC</p>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
                                         </div>
                                     )}
                                 </div>
