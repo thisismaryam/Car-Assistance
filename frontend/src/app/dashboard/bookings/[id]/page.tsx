@@ -1,12 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
 import Link from "next/link";
 
 export default function BookingDetailsPage() {
     const params = useParams();
-    const router = useRouter();
     const bookingId = params?.id;
 
     const [booking, setBooking] = useState<any>(null);
@@ -20,22 +19,18 @@ export default function BookingDetailsPage() {
         setLoading(true);
         setError(null);
 
-        const token = localStorage.getItem("token");
-        if (!token) {
-            router.push("/login");
-            return;
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+        const headers: Record<string, string> = {};
+        if (token) {
+            headers["Authorization"] = `Bearer ${token}`;
         }
 
         try {
-            const res = await fetch(`http://localhost:8000/bookings/${bookingId}`, {
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                },
-            });
+            const res = await fetch(`http://localhost:8000/bookings/${bookingId}`, { headers });
 
             if (!res.ok) {
                 if (res.status === 404) {
-                    throw new Error("Booking not found or not authorized for your account.");
+                    throw new Error("Booking not found or reference ID is invalid.");
                 }
                 const errData = await res.json().catch(() => ({}));
                 throw new Error(errData.detail || "Failed to load booking details");
@@ -56,20 +51,22 @@ export default function BookingDetailsPage() {
 
     const handleCancelBooking = async () => {
         if (!booking) return;
-        if (!confirm("Are you sure you want to cancel this booking? Reserved bay or mechanic capacity will be released.")) {
+        if (!confirm("Are you sure you want to cancel this booking?")) {
             return;
         }
 
         setCancelling(true);
         setActionMsg("");
-        const token = localStorage.getItem("token");
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) {
+            headers["Authorization"] = `Bearer ${token}`;
+        }
 
         try {
             const res = await fetch(`http://localhost:8000/bookings/${booking.id}/cancel`, {
                 method: "PATCH",
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                },
+                headers,
             });
 
             if (!res.ok) {
@@ -79,7 +76,7 @@ export default function BookingDetailsPage() {
 
             const updated = await res.json();
             setBooking(updated);
-            setActionMsg("Booking has been cancelled. Capacity was automatically restored.");
+            setActionMsg("Booking has been cancelled.");
         } catch (err: any) {
             setActionMsg(`Error: ${err.message}`);
         } finally {
@@ -92,7 +89,7 @@ export default function BookingDetailsPage() {
             <main className="p-6 md:p-12 max-w-4xl mx-auto">
                 <div className="flex items-center gap-3 text-gray-400 text-sm mb-6">
                     <span className="w-4 h-4 border-2 border-t-[#2563EB] border-gray-600 rounded-full animate-spin"></span>
-                    <span>Verifying and loading database booking record #{bookingId}...</span>
+                    <span>Loading booking record #{bookingId}...</span>
                 </div>
             </main>
         );
@@ -105,10 +102,10 @@ export default function BookingDetailsPage() {
                     <h2 className="text-lg font-bold text-red-400 mb-2">Unable to Load Booking</h2>
                     <p className="text-sm text-gray-300 mb-6">{error || "Record could not be retrieved from database."}</p>
                     <Link
-                        href="/dashboard/bookings"
+                        href="/dashboard"
                         className="inline-block bg-[#151D2A] border border-[#1e293b] hover:border-gray-500 text-white px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors"
                     >
-                        ← Return to My Bookings
+                        ← Back to Booking Portal
                     </Link>
                 </div>
             </main>
@@ -137,10 +134,10 @@ export default function BookingDetailsPage() {
             {/* Breadcrumb Navigation */}
             <div className="flex items-center justify-between mb-6">
                 <Link
-                    href="/dashboard/bookings"
+                    href="/dashboard"
                     className="text-xs text-[#2563EB] hover:underline flex items-center gap-1 font-semibold"
                 >
-                    ← Back to My Bookings
+                    ← Back to Booking Portal
                 </Link>
                 <span className="text-xs text-gray-500 font-mono">
                     Ref ID: #{booking.id}
@@ -158,7 +155,7 @@ export default function BookingDetailsPage() {
                             </span>
                         </div>
                         <p className="text-xs text-gray-400 mt-1">
-                            Created on {new Date(booking.created_at).toLocaleString()}
+                            Booked for {booking.customer?.full_name} ({booking.customer?.email}) · Created on {new Date(booking.created_at).toLocaleString()}
                         </p>
                     </div>
 
@@ -179,33 +176,37 @@ export default function BookingDetailsPage() {
                     </div>
                 )}
 
-                {/* Details Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {/* Clean 3-Card Details Grid (Workshop bay & staff card removed) */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     {/* Service Information */}
-                    <div className="bg-[#090D14] border border-[#1e293b] rounded-lg p-5">
-                        <div className="flex items-center justify-between mb-3">
-                            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Service Selected</h3>
-                            <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-[#2563EB]/15 text-[#2563EB] border border-[#2563EB]/30">
-                                {booking.service?.service_type?.toUpperCase()}
-                            </span>
+                    <div className="bg-[#090D14] border border-[#1e293b] rounded-lg p-5 flex flex-col justify-between">
+                        <div>
+                            <div className="flex items-center justify-between mb-3">
+                                <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Service</h3>
+                                <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-[#2563EB]/15 text-[#2563EB] border border-[#2563EB]/30">
+                                    {booking.service?.service_type?.toUpperCase()}
+                                </span>
+                            </div>
+                            <p className="text-base font-bold text-white mb-1">{booking.service?.name}</p>
+                            <p className="text-xs text-gray-400 mb-4">{booking.service?.description}</p>
                         </div>
-                        <p className="text-lg font-bold text-white mb-1">{booking.service?.name}</p>
-                        <p className="text-xs text-gray-400 mb-4">{booking.service?.description}</p>
                         <div className="flex justify-between items-center text-xs border-t border-[#1e293b] pt-3 text-gray-300">
-                            <span>Base Rate: <strong className="text-white">${booking.service?.base_price}</strong></span>
-                            <span>Duration: <strong className="text-white">{booking.service?.duration_minutes} min</strong></span>
+                            <span>Rate: <strong className="text-emerald-400 font-bold">Rs. {booking.service?.base_price}</strong></span>
+                            <span>{booking.service?.duration_minutes} min</span>
                         </div>
                     </div>
 
                     {/* Vehicle Information */}
-                    <div className="bg-[#090D14] border border-[#1e293b] rounded-lg p-5">
-                        <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Vehicle Details</h3>
-                        <p className="text-lg font-bold text-white mb-1">
-                            {booking.vehicle?.year} {booking.vehicle?.make} {booking.vehicle?.model}
-                        </p>
-                        <p className="text-xs text-gray-400 font-mono mb-4">
-                            Plate: <span className="text-gray-200 font-bold">{booking.vehicle?.registration}</span>
-                        </p>
+                    <div className="bg-[#090D14] border border-[#1e293b] rounded-lg p-5 flex flex-col justify-between">
+                        <div>
+                            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Vehicle Details</h3>
+                            <p className="text-base font-bold text-white mb-1">
+                                {booking.vehicle?.year} {booking.vehicle?.make} {booking.vehicle?.model}
+                            </p>
+                            <p className="text-xs text-gray-400 font-mono mb-2">
+                                Plate: <span className="text-white font-bold">{booking.vehicle?.registration}</span>
+                            </p>
+                        </div>
                         {booking.vehicle?.notes && (
                             <p className="text-xs text-gray-500 italic border-t border-[#1e293b] pt-3">
                                 Notes: {booking.vehicle.notes}
@@ -214,50 +215,34 @@ export default function BookingDetailsPage() {
                     </div>
 
                     {/* Schedule Information */}
-                    <div className="bg-[#090D14] border border-[#1e293b] rounded-lg p-5">
-                        <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Appointment Schedule</h3>
-                        <p className="text-base font-bold text-white mb-1">
-                            📅 {scheduledDate.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
-                        </p>
-                        <p className="text-sm font-semibold text-[#2563EB]">
-                            ⏰ {scheduledDate.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
-                        </p>
-                        <p className="text-[11px] text-gray-500 mt-2 font-mono">
+                    <div className="bg-[#090D14] border border-[#1e293b] rounded-lg p-5 flex flex-col justify-between">
+                        <div>
+                            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Appointment Time</h3>
+                            <p className="text-sm font-bold text-white mb-1">
+                                📅 {scheduledDate.toLocaleDateString(undefined, { weekday: "short", year: "numeric", month: "short", day: "numeric" })}
+                            </p>
+                            <p className="text-base font-bold text-[#2563EB]">
+                                ⏰ {scheduledDate.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+                            </p>
+                        </div>
+                        <p className="text-[11px] text-gray-500 font-mono border-t border-[#1e293b] pt-3">
                             UTC: {scheduledDate.toUTCString()}
                         </p>
                     </div>
-
-                    {/* Assigned Mechanic / Location */}
-                    <div className="bg-[#090D14] border border-[#1e293b] rounded-lg p-5">
-                        <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">
-                            {booking.service?.service_type === "home" ? "Service Location & Mechanic" : "Workshop Bay & Staff"}
-                        </h3>
-
-                        {booking.address && (
-                            <div className="mb-3">
-                                <span className="text-xs text-gray-400">Address:</span>
-                                <p className="text-xs font-medium text-white">{booking.address}</p>
-                            </div>
-                        )}
-
-                        <div>
-                            <span className="text-xs text-gray-400">Assigned Technician:</span>
-                            {booking.mechanic ? (
-                                <div className="mt-1 flex items-center justify-between">
-                                    <p className="text-sm font-bold text-emerald-400">✓ {booking.mechanic.full_name}</p>
-                                    <span className="text-xs font-mono text-gray-400">{booking.mechanic.phone}</span>
-                                </div>
-                            ) : (
-                                <p className="text-xs text-gray-500 italic mt-1">Pending dispatch assignment by operations</p>
-                            )}
-                        </div>
-                    </div>
                 </div>
+
+                {/* Service Address for Home Services */}
+                {booking.address && (
+                    <div className="mt-6 bg-[#090D14] border border-[#1e293b] rounded-lg p-4">
+                        <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Service Address</h4>
+                        <p className="text-xs text-white">{booking.address}</p>
+                    </div>
+                )}
 
                 {/* Additional Customer Notes */}
                 {booking.notes && (
-                    <div className="mt-6 bg-[#090D14] border border-[#1e293b] rounded-lg p-4">
-                        <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Customer / Booking Notes</h4>
+                    <div className="mt-4 bg-[#090D14] border border-[#1e293b] rounded-lg p-4">
+                        <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Notes</h4>
                         <p className="text-xs text-gray-300">{booking.notes}</p>
                     </div>
                 )}
@@ -265,9 +250,9 @@ export default function BookingDetailsPage() {
 
             {/* Help / Emergency link */}
             <div className="flex justify-between items-center text-xs text-gray-500">
-                <span>Need emergency roadside assistance instead?</span>
+                <span>Need 24/7 emergency roadside towing or jump-start?</span>
                 <Link href="/emergency" className="text-red-400 font-bold hover:underline">
-                    Go to 24/7 Roadside Portal →
+                    Roadside Assistance →
                 </Link>
             </div>
         </main>

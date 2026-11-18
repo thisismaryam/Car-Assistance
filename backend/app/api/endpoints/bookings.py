@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, date as py_date, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import cast, Date, func, text
@@ -8,7 +9,7 @@ from app.models.vehicle import Vehicle
 from app.models.user import User, UserRole
 from app.schemas.booking import BookingCreate, BookingRead, StatusUpdate
 from app.schemas.mechanic import AssignMechanicPayload
-from app.core.security import get_current_user, require_admin
+from app.core.security import get_current_user, get_optional_current_user, require_admin, hash_password
 from app.utils.email import send_email
 from app.services.availability import (
     calculate_slot_availability,
@@ -50,14 +51,75 @@ def check_availability(
 
 
 @router.post("/", response_model=BookingRead, status_code=201)
-def create_booking(payload: BookingCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # 1. Validate ownership of the selected vehicle (FEATURE 3)
-    vehicle = db.query(Vehicle).filter(
-        Vehicle.id == payload.vehicle_id, Vehicle.owner_id == current_user.id).first()
-    if not vehicle:
-        raise HTTPException(status_code=404, detail="Vehicle not found or does not belong to your account")
+def create_booking(
+    payload: BookingCreate,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_current_user),
+):
+    # 1. Resolve or create user (Guest Booking Support)
+    user = None
+    if payload.customer_email and payload.customer_email.strip():
+        email_clean = payload.customer_email.strip().lower()
+        user = db.query(User).filter(func.lower(User.email) == email_clean).first()
+        if not user:
+            random_pw = str(uuid.uuid4())
+            user = User(
+                full_name=(payload.customer_name or "Guest Customer").strip(),
+                email=email_clean,
+                phone=(payload.customer_phone or "").strip(),
+                hashed_password=hash_password(random_pw),
+                role=UserRole.CUSTOMER,
+                is_active=True,
+            )
+            db.add(user)
+            db.flush()
+        else:
+            if payload.customer_name and (not user.full_name or user.full_name == "Guest Customer"):
+                user.full_name = payload.customer_name.strip()
+            if payload.customer_phone and not user.phone:
+                user.phone = payload.customer_phone.strip()
+            db.flush()
+    elif current_user:
+        user = current_user
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Guest details required: customer_name, customer_email, customer_phone."
+        )
 
-    # 2. Validate service eligibility (FEATURE 3)
+    # 2. Resolve or create vehicle
+    vehicle = None
+    if payload.vehicle_registration and payload.vehicle_registration.strip():
+        reg_clean = payload.vehicle_registration.strip().upper()
+        vehicle = db.query(Vehicle).filter(func.upper(Vehicle.registration) == reg_clean).first()
+        if not vehicle:
+            vehicle = Vehicle(
+                owner_id=user.id,
+                make=(payload.vehicle_make or "Unknown").strip(),
+                model=(payload.vehicle_model or "Unknown").strip(),
+                year=payload.vehicle_year or datetime.now().year,
+                registration=reg_clean,
+                notes=payload.notes,
+            )
+            db.add(vehicle)
+            db.flush()
+        else:
+            if vehicle.owner_id != user.id:
+                vehicle.owner_id = user.id
+                db.flush()
+    elif payload.vehicle_id:
+        vehicle = db.query(Vehicle).filter(Vehicle.id == payload.vehicle_id).first()
+        if not vehicle:
+            raise HTTPException(status_code=404, detail="Vehicle not found")
+        if current_user and vehicle.owner_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Vehicle not found or does not belong to your account")
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Vehicle details required: vehicle_make, vehicle_model, vehicle_year, vehicle_registration."
+        )
+
+    # 3. Validate service eligibility (FEATURE 3)
     service = db.query(Service).filter(
         Service.id == payload.service_id, Service.is_active == True).first()
     if not service:
@@ -69,20 +131,18 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), curren
     if service.service_type == ServiceType.HOME and (not payload.address or not payload.address.strip()):
         raise HTTPException(status_code=400, detail="Home address is required for home service bookings")
 
-    # 3. Concurrency Protection & Transaction Locking (FEATURE 1 & FEATURE 3)
-    # Uses PostgreSQL advisory transaction lock on slot key to serialize simultaneous booking attempts on the same slot
+    # 4. Concurrency Protection & Transaction Locking (FEATURE 1 & FEATURE 3)
     slot_iso = payload.scheduled_at.replace(microsecond=0).isoformat()
     lock_key = f"slot_{service.service_type.value}_{slot_iso}"
     try:
         db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key})
     except Exception:
-        pass  # Fallback if dialect does not support pg advisory lock
+        pass
 
-    # 4. Prevent accidental duplicate submissions (FEATURE 3)
-    # Check if exact duplicate was submitted recently
+    # 5. Prevent accidental duplicate submissions (FEATURE 3)
     recent_dup = db.query(Booking).filter(
-        Booking.customer_id == current_user.id,
-        Booking.vehicle_id == payload.vehicle_id,
+        Booking.customer_id == user.id,
+        Booking.vehicle_id == vehicle.id,
         Booking.service_id == payload.service_id,
         Booking.scheduled_at == payload.scheduled_at,
         Booking.status != BookingStatus.CANCELLED
@@ -90,7 +150,7 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), curren
     if recent_dup:
         raise HTTPException(status_code=400, detail="You already have an active booking for this vehicle, service, and time.")
 
-    # 5. Prevent conflicting bookings for the SAME vehicle and time (FEATURE 3)
+    # 6. Prevent conflicting bookings for the SAME vehicle and time (FEATURE 3)
     service_duration = service.duration_minutes or 60
     slot_end = payload.scheduled_at + timedelta(minutes=service_duration)
 
@@ -98,7 +158,7 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), curren
         db.query(Booking)
         .join(Service)
         .filter(
-            Booking.vehicle_id == payload.vehicle_id,
+            Booking.vehicle_id == vehicle.id,
             Booking.status.in_([
                 BookingStatus.PENDING,
                 BookingStatus.CONFIRMED,
@@ -116,10 +176,10 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), curren
             detail=f"Conflicting booking: Vehicle is already scheduled for #{vehicle_conflict.id} ({vehicle_conflict.service.name}) during this time window."
         )
 
-    # 6. Check active bookings for the same service on this vehicle (FEATURE 3)
+    # 7. Check active bookings for the same service on this vehicle (FEATURE 3)
     now_utc = datetime.now(timezone.utc)
     same_svc_active = db.query(Booking).filter(
-        Booking.vehicle_id == payload.vehicle_id,
+        Booking.vehicle_id == vehicle.id,
         Booking.service_id == payload.service_id,
         Booking.status.in_([BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.ASSIGNED]),
         Booking.scheduled_at >= now_utc
@@ -130,10 +190,10 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), curren
             detail=f"This vehicle already has an upcoming active booking for {service.name} on {same_svc_active.scheduled_at.strftime('%Y-%m-%d %H:%M UTC')}."
         )
 
-    # 7. Daily 5-booking limit check
+    # 8. Daily 5-booking limit check
     target_date = payload.scheduled_at.date()
     daily_count = db.query(Booking).filter(
-        Booking.customer_id == current_user.id,
+        Booking.customer_id == user.id,
         cast(Booking.scheduled_at, Date) == target_date,
         Booking.status != BookingStatus.CANCELLED
     ).count()
@@ -144,7 +204,7 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), curren
             detail="Daily booking limit reached (5). Please choose another day."
         )
 
-    # 8. Slot capacity & lead time verification (FEATURE 1)
+    # 9. Slot capacity & lead time verification (FEATURE 1)
     slot_info = calculate_slot_availability(
         db=db,
         service=service,
@@ -160,7 +220,7 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), curren
             detail=f"Requested appointment slot is unavailable: {slot_info['reason']}.{alt_str}"
         )
 
-    # 9. Auto-assign mechanic for home service if available (FEATURE 2)
+    # 10. Auto-assign mechanic for home service if available (FEATURE 2)
     assigned_mechanic_id = None
     if service.service_type == ServiceType.HOME:
         free_mechanic_ids = slot_info.get("available_mechanic_ids", [])
@@ -170,8 +230,8 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), curren
     initial_status = BookingStatus.ASSIGNED if assigned_mechanic_id else BookingStatus.PENDING
 
     booking = Booking(
-        customer_id=current_user.id,
-        vehicle_id=payload.vehicle_id,
+        customer_id=user.id,
+        vehicle_id=vehicle.id,
         service_id=payload.service_id,
         mechanic_id=assigned_mechanic_id,
         scheduled_at=payload.scheduled_at,
@@ -182,6 +242,30 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), curren
     db.add(booking)
     db.commit()
     db.refresh(booking)
+
+    # 11. Send Confirmation Email to the Customer
+    try:
+        recipient_email = user.email or payload.customer_email
+        if recipient_email:
+            sched_str = booking.scheduled_at.strftime('%Y-%m-%d %H:%M UTC')
+            email_body = (
+                f"Hello {user.full_name},\n\n"
+                f"Your booking for {service.name} has been received and confirmed.\n\n"
+                f"Booking ID: #{booking.id}\n"
+                f"Vehicle: {vehicle.year} {vehicle.make} {vehicle.model} ({vehicle.registration})\n"
+                f"Scheduled Time: {sched_str}\n"
+                f"Price: Rs. {service.base_price:.2f}\n"
+            )
+            if booking.address:
+                email_body += f"Service Address: {booking.address}\n"
+            email_body += "\nThank you for choosing Car Assistance!\nCar Assistance Team"
+            send_email(
+                to_email=recipient_email,
+                subject=f"Booking Confirmation #{booking.id} - Car Assistance",
+                body=email_body,
+            )
+    except Exception as email_err:
+        print(f"[BOOKING CONFIRMATION EMAIL ERROR] {email_err}")
 
     return (
         db.query(Booking)
@@ -231,11 +315,11 @@ def get_all_bookings(db: Session = Depends(get_db), admin: User = Depends(requir
 def get_booking_by_id(
     booking_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User | None = Depends(get_optional_current_user)
 ):
     """
     FEATURE 6: Direct verified booking details endpoint.
-    Retrieves full verified records from the database with proper authorization.
+    Retrieves full verified records from the database.
     """
     query = (
         db.query(Booking)
@@ -247,7 +331,7 @@ def get_booking_by_id(
         )
         .filter(Booking.id == booking_id)
     )
-    if current_user.role != UserRole.ADMIN:
+    if current_user and current_user.role != UserRole.ADMIN:
         query = query.filter(Booking.customer_id == current_user.id)
 
     booking = query.first()

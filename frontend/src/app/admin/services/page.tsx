@@ -83,7 +83,7 @@ export default function AdminServicesPage() {
                             <tr key={s.id} className="border-b border-[#1e293b] hover:bg-[#1e293b]/30 transition-colors">
                                 <td className="px-6 py-4 font-bold text-white">{s.name}</td>
                                 <td className="px-6 py-4 capitalize">{s.service_type}</td>
-                                <td className="px-6 py-4 text-[#2563EB] font-bold">{s.base_price}</td>
+                                <td className="px-6 py-4 text-[#2563EB] font-bold">Rs. {s.base_price}</td>
                                 <td className="px-6 py-4">{s.duration_minutes} mins</td>
                             </tr>
                         ))}

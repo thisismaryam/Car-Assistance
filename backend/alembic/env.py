@@ -1,19 +1,16 @@
-import app.models.booking
-import app.models.vehicle
-import app.models.user
-import app.models.roadside
-import app.models.mechanic
-from app.core.config import settings
-from app.database import Base
-from logging.config import fileConfig
 import sys
 from pathlib import Path
+from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config, pool
-from alembic import context
-
+# Ensure backend root is on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from alembic import context
+from sqlalchemy import engine_from_config, pool
+
+import app.models
+from app.core.config import settings
+from app.database import Base
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)

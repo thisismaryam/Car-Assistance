@@ -7,26 +7,22 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     const pathname = usePathname();
 
     const links = [
-        { name: "Workshop Service", href: "/dashboard" },
-        { name: "Home Service", href: "/dashboard/home-service" },
-        { name: "My Garage", href: "/dashboard/vehicles" },
-        { name: "My Bookings", href: "/dashboard/bookings" },
+        { name: "Workshop", href: "/dashboard" },
+        { name: "At-home service", href: "/dashboard/home-service" },
+        { name: "My garage", href: "/dashboard/vehicles" },
+        { name: "My bookings", href: "/dashboard/bookings" },
     ];
 
     return (
-        <div className="flex min-h-[calc(100vh-64px)]">
-            {/* Sidebar */}
-            <aside className="w-64 border-r border-[#151D2A] bg-[#090D14] p-6 hidden md:block">
-                <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-6">Customer Portal</h2>
-                <nav className="flex flex-col gap-2">
+        <div className="portal-layout">
+            <aside className="portal-sidebar">
+                <p className="eyebrow mb-8">Your account</p>
+                <nav className="portal-nav">
                     {links.map((link) => (
                         <Link
                             key={link.href}
                             href={link.href}
-                            className={`px-4 py-2.5 rounded-md text-sm font-medium transition-colors ${pathname === link.href
-                                ? "bg-[#2563EB]/10 text-[#2563EB]"
-                                : "text-gray-400 hover:text-white hover:bg-[#151D2A]"
-                                }`}
+                            className={`portal-nav-link ${pathname === link.href ? "portal-nav-link-active" : ""}`}
                         >
                             {link.name}
                         </Link>
@@ -34,8 +30,19 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 </nav>
             </aside>
 
-            {/* Main Content Area */}
-            <div className="flex-1 bg-[#090D14]">
+            <nav className="portal-mobile-nav" aria-label="Customer navigation">
+                {links.map((link) => (
+                    <Link
+                        key={link.href}
+                        href={link.href}
+                        className={`portal-nav-link ${pathname === link.href ? "portal-nav-link-active" : ""}`}
+                    >
+                        {link.name}
+                    </Link>
+                ))}
+            </nav>
+
+            <div className="portal-main">
                 {children}
             </div>
         </div>

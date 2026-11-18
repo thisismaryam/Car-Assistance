@@ -32,17 +32,17 @@
 
 ## 1. Project Overview
 
-**Car Assistance** is a full-stack web application for an automotive service business. It allows customers to book vehicle maintenance and repair services either at a physical workshop or via home-service visits, and to request emergency roadside assistance. Business administrators manage service offerings, mechanic schedules, and booking assignments through a separate admin portal. An AI-powered chat assistant is embedded site-wide to handle customer queries and guide them through the booking flow conversationally.
+**Car Assistance** is a full-stack web application for an automotive service business. Customers book vehicle maintenance and repairs via a frictionless **Guest Booking Flow** (no user registration or account login required). Customer and vehicle records are created or matched on-the-fly, and bookings are immediately confirmed with email notifications. Business administrators and mechanics access operations, service catalogues, rosters, and live dispatch through a password-protected staff portal (`/login` and `/admin`). An AI-powered automotive assistant powered by Groq LLM (`openai/gpt-oss-120b`) is embedded site-wide to answer questions, recommend services, and assist with scheduling.
 
 ### Business Domain
 
 | Capability | Description |
 |---|---|
-| Workshop bookings | Customer schedules a service at the physical workshop; slot availability is enforced per bay capacity |
-| Home service bookings | Mechanic dispatched to customer's address; availability is per-mechanic with travel buffers |
+| Guest workshop bookings | Customers schedule service at the workshop without login; slot availability is enforced silently by bay capacity |
+| Guest home service bookings | Mobile mechanic dispatched to customer's doorstep with travel buffers; no login required |
 | Roadside / emergency dispatch | Customer triggers an SOS; admin assigns a mechanic; real-time status pushed via WebSocket |
-| AI chat assistant | Conversational interface: answers FAQs, retrieves live pricing/availability, executes bookings |
-| Admin panel | Full CRUD over services, mechanics, bookings, and roadside requests |
+| AI automotive assistant | Groq LLM inference with expert automotive prompt, recommending services in PKR / Rs. with rule-based fallback |
+| Admin / Staff console | Password-protected portal for Admins and Mechanics managing services, rosters, bookings, and roadside alerts |
 
 ### Tech Stack Summary
 
@@ -52,7 +52,7 @@
 | **API framework** | FastAPI (async) |
 | **ORM** | SQLAlchemy 2.x (async, `asyncpg` / `psycopg` driver) |
 | **Database** | PostgreSQL (port 2004) |
-| **Migrations** | Alembic (installed, **not used** — schema managed via `create_all`) |
+| **Migrations** | Alembic (configured and active — schema versioned via migrations) |
 | **Auth** | JWT (HS256) via `python-jose`; passwords hashed with `passlib[bcrypt]` |
 | **Settings** | `pydantic-settings` reading from `.env` |
 | **Frontend framework** | Next.js 16.4.6 (App Router) |
@@ -279,9 +279,15 @@ cd e:\CarAssistance\frontend
 npm install
 ```
 
-### Step 5 — Database initialisation
+### Step 5 — Database initialisation & Migrations
 
-There are **no migration scripts**. Tables are created automatically when the backend starts, via SQLAlchemy's `Base.metadata.create_all(engine)` call in `app/main.py` on the `startup` lifecycle event. Simply start the backend (see §6) and all tables will be created on first run.
+Database tables are managed via **Alembic migrations** (not `create_all`). To apply all schema migrations:
+
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+alembic upgrade head
+```
 
 ---
 
@@ -368,7 +374,7 @@ npm run dev
 
 ## 7. Database Schema
 
-Tables are defined in `backend/app/models/`. All are created via `Base.metadata.create_all()` on startup. There are no Alembic migration files.
+Tables are defined in `backend/app/models/` and managed with versioned Alembic migrations in `backend/alembic/versions/`.
 
 ---
 
@@ -620,30 +626,37 @@ Response:
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/bookings/availability` | None | Get available time slots |
-| `POST` | `/bookings/` | Bearer | Create a booking |
+| `POST` | `/bookings/` | None (Guest-Friendly) | Create a guest or authenticated booking |
 | `GET` | `/bookings/my` | Bearer | List current user's bookings |
 | `GET` | `/bookings/all` | Admin | List all bookings system-wide |
-| `GET` | `/bookings/{id}` | Bearer | Get booking detail (owner or admin) |
+| `GET` | `/bookings/{id}` | Optional / Bearer | Get booking detail record |
 | `PATCH` | `/bookings/{id}/assign` | Admin | Assign a mechanic to a booking |
-| `PATCH` | `/bookings/{id}/cancel` | Bearer | Cancel a booking (owner or admin) |
+| `PATCH` | `/bookings/{id}/cancel` | Optional / Bearer | Cancel a booking |
 | `PATCH` | `/bookings/{id}/status` | Admin | Update booking status to any value |
 
 **GET `/bookings/availability`** query parameters:
 - `service_id` (int, required)
 - `date` (string, required, format: `YYYY-MM-DD`)
 
-Response: list of `AvailabilitySlot` objects — each has `start_time`, `end_time`, `available` (bool), `capacity_remaining` (int).
+Response: list of `AvailabilitySlot` objects — each has `start_time`, `end_time`, `is_available` (bool), `remaining_capacity` (int).
 
-**POST `/bookings/`** request body:
+**POST `/bookings/`** request body (Guest flow):
 ```json
 {
+  "customer_name": "Tariq Khan",
+  "customer_email": "tariq@example.com",
+  "customer_phone": "+92 300 1234567",
+  "vehicle_make": "Toyota",
+  "vehicle_model": "Corolla",
+  "vehicle_year": 2021,
+  "vehicle_registration": "ABC-1234",
   "service_id": 1,
-  "vehicle_id": 3,
   "scheduled_at": "2026-11-25T10:00:00Z",
-  "address": "123 Main St",
-  "notes": "Please call before arriving"
+  "address": "House 42, St 14, Islamabad (required for home service)",
+  "notes": "Optional notes"
 }
 ```
+*Note: Backend auto-creates a Customer User (with random password) if `customer_email` does not exist, provisions the Vehicle, links the booking, and triggers a confirmation email.*
 
 ---
 
@@ -794,39 +807,41 @@ The AI booking flow ends with a summary presentation. The booking is not execute
 | Route | Page File | Auth Required | Purpose |
 |---|---|---|---|
 | `/` | `app/page.tsx` | None | Public landing page |
-| `/login` | `app/login/page.tsx` | None | Customer login (no registration form) |
-| `/services` | `app/services/page.tsx` | None | Public service catalog |
-| `/emergency` | `app/emergency/page.tsx` | Bearer | Submit SOS + live status tracking |
-| `/dashboard` | `app/dashboard/page.tsx` | Bearer | Workshop booking wizard |
-| `/dashboard/home-service` | `app/dashboard/home-service/page.tsx` | Bearer | Home service booking form |
-| `/dashboard/vehicles` | `app/dashboard/vehicles/page.tsx` | Bearer | Garage (add/delete vehicles) |
-| `/dashboard/bookings` | `app/dashboard/bookings/page.tsx` | Bearer | Booking history |
-| `/dashboard/bookings/[id]` | `app/dashboard/bookings/[id]/page.tsx` | Bearer | Booking detail + cancel button |
-| `/admin/login` | `app/admin/login/page.tsx` | None | Admin login (same backend endpoint) |
-| `/admin` | `app/admin/page.tsx` | Admin role | Overview dashboard |
+| `/login` | `app/login/page.tsx` | Staff Only | Operations login for Admin and Mechanics (redirects to `/admin`) |
+| `/services` | `app/services/page.tsx` | None | Public service catalog with PKR rates |
+| `/emergency` | `app/emergency/page.tsx` | None / Bearer | Submit SOS + live status tracking |
+| `/dashboard` | `app/dashboard/page.tsx` | None (Guest) | 3-step guest workshop booking wizard |
+| `/dashboard/home-service` | `app/dashboard/home-service/page.tsx` | None (Guest) | 3-step guest doorstep mobile booking wizard |
+| `/dashboard/vehicles` | `app/dashboard/vehicles/page.tsx` | Bearer | Garage management (for registered users) |
+| `/dashboard/bookings` | `app/dashboard/bookings/page.tsx` | Bearer | Booking history list |
+| `/dashboard/bookings/[id]` | `app/dashboard/bookings/[id]/page.tsx` | None / Bearer | Clean 3-card booking detail view + cancel button |
+| `/admin` | `app/admin/page.tsx` | Admin role | Overview operations dashboard |
 | `/admin/bookings` | `app/admin/bookings/page.tsx` | Admin role | Booking management + assign mechanic |
 | `/admin/mechanics` | `app/admin/mechanics/page.tsx` | Admin role | Mechanic CRUD + schedule editor |
 | `/admin/services` | `app/admin/services/page.tsx` | Admin role | Service catalog management |
 | `/admin/roadside` | `app/admin/roadside/page.tsx` | Admin role | Live roadside dispatch console |
 
 **Auth guards:**
-- `app/dashboard/layout.tsx`: reads `localStorage["token"]`, calls `GET /auth/me`, redirects to `/login` if missing or expired.
-- `app/admin/layout.tsx`: same as above, additionally checks `role === "admin"`, redirects to `/admin/login` if not.
+- `app/dashboard/`: No longer enforces forced login. Customers book directly without friction.
+- `app/admin/layout.tsx`: Checks `localStorage["token"]` and verifies `role === "admin"`, redirects unauthorized users to `/login`.
 
 ---
 
 ## 11. User Roles & Permissions
 
-| Capability | Customer | Mechanic | Admin |
-|---|---|---|---|
-| Register (self-service) | ✅ via API | ❌ | ❌ |
-| Login | ✅ | ✅ | ✅ |
-| View service catalog | ✅ | ✅ | ✅ |
-| Add / delete own vehicles | ✅ | ✅ | ✅ |
-| Create bookings | ✅ | ✅ | ✅ |
-| View own bookings | ✅ | ✅ | ✅ |
-| Cancel own bookings | ✅ | ✅ | ✅ |
-| Submit roadside request | ✅ | ✅ | ✅ |
+| Capability | Guest Customer | Registered Customer | Mechanic | Admin |
+|---|---|---|---|---|
+| Book workshop or home service | ✅ (Instant guest flow) | ✅ | ✅ | ✅ |
+| View confirmed booking details | ✅ (via Direct Ref ID) | ✅ | ✅ | ✅ |
+| Access staff portal (`/admin`) | ❌ | ❌ | ✅ (Assigned tasks) | ✅ (Full control) |
+| View service catalog (PKR) | ✅ | ✅ | ✅ | ✅ |
+| Cancel own bookings | ✅ | ✅ | ❌ | ✅ |
+| Submit roadside request | ✅ | ✅ | ✅ | ✅ |
+| View all bookings | ❌ | ❌ | ❌ | ✅ |
+| Assign mechanic to booking | ❌ | ❌ | ❌ | ✅ |
+| Update booking status | ❌ | ❌ | ❌ | ✅ |
+| Access admin WebSocket stream | ❌ | ❌ | ❌ | ✅ |
+| Create services & mechanics | ❌ | ❌ | ❌ | ✅ |
 | View all bookings | ❌ | ❌ | ✅ |
 | Assign mechanic to booking | ❌ | ❌ | ✅ |
 | Update booking status | ❌ | ❌ | ✅ |
@@ -1046,10 +1061,10 @@ This section documents every identified issue. All items should be triaged befor
 
 | ID | Issue | Location | Impact |
 |---|---|---|---|
-| STB-1 | No database migrations (Alembic unused) | `app/main.py` | Adding/altering columns requires manual SQL or table drop; no rollback capability |
+| STB-1 | ~~No database migrations~~ (Resolved) | `alembic/` | Migrations restored and active with `alembic upgrade head` |
 | STB-2 | `en route` vs `en_route` status inconsistency | `models/roadside.py`, `roadside_dispatch.py` | Dual-value checks everywhere; will break if any check is missed |
 | STB-3 | WebSocket connections are in-memory only | `services/roadside_dispatch.py` | Multi-process deployment will drop messages; no message persistence |
-| STB-4 | `create_all` does not apply schema changes to existing tables | `app/main.py` | Existing deployments will not receive new columns without manual migration |
+| STB-4 | ~~`create_all` in main.py~~ (Resolved) | `app/main.py` | Removed `create_all`; all schema modifications handled by Alembic |
 
 ### 🟡 Medium (Maintainability / Developer Experience)
 
@@ -1068,11 +1083,11 @@ This section documents every identified issue. All items should be triaged befor
 | ID | Issue | Location | Impact |
 |---|---|---|---|
 | UX-1 | `VehicleForm.tsx` exists but is never imported | `components/VehicleForm.tsx` | Dead code; dashboard pages use inline vehicle forms instead |
-| UX-2 | No customer registration UI | `app/login/page.tsx` | "Register here" text is present but no link or form exists |
-| UX-3 | Currency inconsistency: AI/backend uses `$`, services UI shows `PKR` | `services/page.tsx`, `knowledge/approved_knowledge.py` | Confusing for users |
+| UX-2 | ~~No customer registration UI~~ (Resolved) | `app/login/page.tsx` | Replaced by frictionless Guest Booking Flow; customer registration no longer required |
+| UX-3 | ~~Currency inconsistency~~ (Resolved) | Site-wide & AI | All pricing standardized to PKR / Rs. across UI, AI prompt, and emails |
 | UX-4 | No frontend error boundaries | All dashboard pages | Uncaught React errors crash the entire page tree |
 | UX-5 | Admin role cannot be self-registered | `api/endpoints/auth.py` | Admin accounts must be created by directly editing the database |
-| UX-6 | No registration link on login page | `app/login/page.tsx` | New customers cannot register through the UI |
+| UX-6 | ~~Customer login barrier~~ (Resolved) | Public Navbar & `/dashboard` | "Log In" link removed from public Navbar; `/login` reserved for staff |
 
 ---
 
@@ -1182,29 +1197,22 @@ There is no structured logging, log rotation, or log file output configured.
 
 The backend uses `datetime.utcnow()` throughout. Slots are generated in UTC. The frontend displays raw UTC timestamps without timezone conversion — users in non-UTC timezones will see UTC times. Implement timezone conversion in the frontend before go-live for a non-UTC audience.
 
-### No Hot Reload for Model Changes
+### Applying and Creating Schema Migrations
 
-`uvicorn --reload` watches Python files and reloads on save, but `create_all` only creates tables that do **not** exist. If you add a column to a model:
+Database schema changes are managed via Alembic:
 
-1. Stop the backend.
-2. Apply the column change manually in SQL (`ALTER TABLE … ADD COLUMN …`).
-3. Restart the backend.
-
-Or drop and recreate the table if data loss is acceptable.
-
-### Starting Alembic Migrations (Recommended Next Step)
-
-The project has Alembic installed. To initialise proper migrations:
-
+To apply existing migrations to the database:
 ```powershell
-cd e:\CarAssistance\backend
-alembic init alembic
-# Edit alembic/env.py to point at your async database URL and import Base
-alembic revision --autogenerate -m "initial schema"
+cd backend
+.\.venv\Scripts\Activate.ps1
 alembic upgrade head
 ```
 
-Then remove the `create_all` call from `app/main.py` startup.
+To create a new migration when changing an SQLAlchemy model:
+```powershell
+alembic revision --autogenerate -m "describe your changes"
+alembic upgrade head
+```
 
 ### Frontend API Base URL
 

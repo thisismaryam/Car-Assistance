@@ -32,11 +32,25 @@ class ServiceRead(BaseModel):
 
 
 class BookingCreate(BaseModel):
-    vehicle_id: int
+    # Guest customer details
+    customer_name: str | None = None
+    customer_email: str | None = None
+    customer_phone: str | None = None
+
+    # Guest vehicle details
+    vehicle_make: str | None = None
+    vehicle_model: str | None = None
+    vehicle_year: int | None = None
+    vehicle_registration: str | None = None
+
+    # Service & Schedule
     service_id: int
     scheduled_at: datetime
     address: str | None = None
     notes: str | None = None
+
+    # Optional vehicle_id for backward compatibility
+    vehicle_id: int | None = None
 
 
 class BookingRead(BaseModel):

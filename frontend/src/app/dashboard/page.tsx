@@ -6,32 +6,53 @@ import Link from "next/link";
 
 export default function DashboardPage() {
     const router = useRouter();
-    const [user, setUser] = useState<any>(null);
-    const [vehicles, setVehicles] = useState<any[]>([]);
-    const [services, setServices] = useState<any[]>([]);
 
-    // Wizard State
+    // Guest Customer & Vehicle State (Step 1)
+    const [guest, setGuest] = useState({
+        customer_name: "",
+        customer_email: "",
+        customer_phone: "",
+        vehicle_make: "",
+        vehicle_model: "",
+        vehicle_year: "",
+        vehicle_registration: "",
+    });
+
+    // Services & Booking State (Steps 2 & 3)
+    const [services, setServices] = useState<any[]>([]);
     const [step, setStep] = useState(1);
-    const [selectedVehicle, setSelectedVehicle] = useState("");
     const [selectedService, setSelectedService] = useState("");
     const [selectedDay, setSelectedDay] = useState("");
     const [slots, setSlots] = useState<any[]>([]);
     const [loadingSlots, setLoadingSlots] = useState(false);
     const [date, setDate] = useState("");
     const [message, setMessage] = useState("");
-
-    // Add Vehicle Form State
-    const [showAddCar, setShowAddCar] = useState(false);
-    const [newCar, setNewCar] = useState({ make: "", model: "", year: "", registration: "" });
-    const [confirmedBooking, setConfirmedBooking] = useState<any | null>(null);
     const [submitting, setSubmitting] = useState(false);
+    const [confirmedBooking, setConfirmedBooking] = useState<any | null>(null);
 
+    // Fetch workshop services (public catalog, no token required)
+    useEffect(() => {
+        fetch("http://localhost:8000/services?service_type=workshop")
+            .then((res) => (res.ok ? res.json() : []))
+            .then((serviceData) => {
+                const workshopServices = Array.isArray(serviceData)
+                    ? serviceData.filter((s: any) => s.service_type === "workshop")
+                    : [];
+                setServices(workshopServices);
+                if (workshopServices.length > 0 && !selectedService) {
+                    setSelectedService(workshopServices[0].id.toString());
+                }
+            })
+            .catch(() => setServices([]));
+    }, []);
+
+    // Fetch availability slots when step 3 or date changes
     const fetchSlots = (dayStr: string, sId: string) => {
         if (!sId || !dayStr) return;
         setLoadingSlots(true);
         fetch(`http://localhost:8000/bookings/availability?service_id=${sId}&date=${dayStr}`)
-            .then(res => res.ok ? res.json() : null)
-            .then(data => {
+            .then((res) => (res.ok ? res.json() : null))
+            .then((data) => {
                 if (data && Array.isArray(data.slots)) {
                     setSlots(data.slots);
                 } else {
@@ -43,7 +64,6 @@ export default function DashboardPage() {
     };
 
     useEffect(() => {
-        if (typeof window === "undefined") return;
         if (step === 3 && selectedService) {
             const todayStr = selectedDay || new Date().toISOString().split("T")[0];
             if (!selectedDay) setSelectedDay(todayStr);
@@ -51,83 +71,66 @@ export default function DashboardPage() {
         }
     }, [step, selectedDay, selectedService]);
 
-    const fetchData = () => {
-        const token = localStorage.getItem("token");
-        if (!token) { router.push("/login"); return; }
-        const headers = { Authorization: `Bearer ${token}` };
-
-        Promise.all([
-            fetch("http://localhost:8000/auth/me", { headers }).then((res) => res.json()),
-            fetch("http://localhost:8000/vehicles/my-vehicles", { headers }).then((res) => res.json()),
-            fetch("http://localhost:8000/services?service_type=workshop").then((res) => res.json()),
-        ]).then(([userData, vehicleData, serviceData]) => {
-            setUser(userData);
-            setVehicles(Array.isArray(vehicleData) ? vehicleData : []);
-            // Enforce ONLY workshop services
-            const workshopServices = Array.isArray(serviceData)
-                ? serviceData.filter((s: any) => s.service_type === "workshop")
-                : [];
-            setServices(workshopServices);
-
-            if (Array.isArray(vehicleData) && vehicleData.length > 0 && !selectedVehicle) {
-                setSelectedVehicle(vehicleData[0].id.toString());
-            }
-            if (workshopServices.length > 0 && !selectedService) {
-                setSelectedService(workshopServices[0].id.toString());
-            }
-        });
-    };
-
-    useEffect(() => {
-        // Prevent running on the server during pre-render
-        if (typeof window === "undefined") return;
-        fetchData();
-    }, [router]);
-
-    const handleAddCar = async (e: React.FormEvent) => {
+    // Validation for Step 1
+    const handleStep1Submit = (e: React.FormEvent) => {
         e.preventDefault();
-        const token = localStorage.getItem("token");
-        const res = await fetch("http://localhost:8000/vehicles", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ ...newCar, year: parseInt(newCar.year) }),
-        });
-        if (res.ok) {
-            const added = await res.json();
-            setShowAddCar(false);
-            setNewCar({ make: "", model: "", year: "", registration: "" });
-            fetchData(); // Refresh list
-            setSelectedVehicle(added.id.toString());
+        setMessage("");
+
+        if (
+            !guest.customer_name.trim() ||
+            !guest.customer_email.trim() ||
+            !guest.customer_phone.trim() ||
+            !guest.vehicle_make.trim() ||
+            !guest.vehicle_model.trim() ||
+            !guest.vehicle_year ||
+            !guest.vehicle_registration.trim()
+        ) {
+            setMessage("Error: Please fill in all customer and vehicle details.");
+            return;
         }
+
+        setStep(2);
     };
 
+    // Final Booking Submission (Guest Flow - No JWT token required)
     const handleBook = async (e: React.FormEvent) => {
         e.preventDefault();
         setMessage("");
         setSubmitting(true);
-        const token = localStorage.getItem("token");
+
+        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) {
+            headers["Authorization"] = `Bearer ${token}`;
+        }
 
         try {
+            const payload = {
+                customer_name: guest.customer_name.trim(),
+                customer_email: guest.customer_email.trim().toLowerCase(),
+                customer_phone: guest.customer_phone.trim(),
+                vehicle_make: guest.vehicle_make.trim(),
+                vehicle_model: guest.vehicle_model.trim(),
+                vehicle_year: parseInt(guest.vehicle_year),
+                vehicle_registration: guest.vehicle_registration.trim().toUpperCase(),
+                service_id: parseInt(selectedService),
+                scheduled_at: new Date(date).toISOString(),
+            };
+
             const res = await fetch("http://localhost:8000/bookings", {
                 method: "POST",
-                headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-                body: JSON.stringify({
-                    vehicle_id: parseInt(selectedVehicle),
-                    service_id: parseInt(selectedService),
-                    scheduled_at: new Date(date).toISOString(),
-                }),
+                headers,
+                body: JSON.stringify(payload),
             });
 
             if (!res.ok) {
                 const errorData = await res.json().catch(() => ({}));
-                throw new Error(errorData.detail || "Failed to book");
+                throw new Error(errorData.detail || "Failed to confirm booking");
             }
 
             const confirmed = await res.json();
-            // FEATURE 6: Prevent any success response or redirection link from being generated
-            // until backend database creation is fully confirmed with valid ID
             if (!confirmed || typeof confirmed.id !== "number") {
-                throw new Error("Server error: database record confirmation was not returned.");
+                throw new Error("Server error: database confirmation record was not returned.");
             }
 
             setConfirmedBooking(confirmed);
@@ -139,38 +142,35 @@ export default function DashboardPage() {
         }
     };
 
-    if (!user) return <div className="p-20 text-center text-gray-500">Loading...</div>;
-
-    const selectedVehicleData = vehicles.find((v: any) => v.id.toString() === selectedVehicle);
+    const selectedServiceData = services.find((s: any) => s.id.toString() === selectedService);
 
     return (
         <main className="p-6 md:p-12 max-w-4xl mx-auto min-h-screen">
             {/* Header */}
-            <div className="flex justify-between items-center mb-8 border-b border-[#101827] pb-4">
-                <div>
-                    <h1 className="text-xl font-bold text-white">Welcome, {user.full_name}</h1>
-                    <p className="text-sm text-gray-400">Manage your bookings</p>
-                </div>
-                <button onClick={() => { localStorage.removeItem("token"); router.push("/"); }} className="text-sm border border-[#1e293b] px-4 py-2 rounded-md hover:border-red-500 hover:text-red-500 transition-colors">
-                    Logout
-                </button>
+            <div className="mb-8 border-b border-[#101827] pb-4">
+                <h1 className="text-2xl font-bold text-white">Workshop Service Booking</h1>
+                <p className="text-xs text-gray-400 mt-1">
+                    Book certified maintenance and repairs at our dedicated workshop bays. Instant confirmation.
+                </p>
             </div>
 
             {/* Booking Wizard Container */}
             <div className="bg-[#151D2A] border border-[#1e293b] rounded-xl p-6 md:p-8 shadow-xl">
-
-                {/* FEATURE 6: Confirmed Booking Direct View Card */}
                 {confirmedBooking ? (
                     <div className="py-6 text-center">
                         <div className="w-12 h-12 bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 rounded-full flex items-center justify-center mx-auto mb-4 text-xl font-bold">
                             ✓
                         </div>
-                        <h2 className="text-xl font-bold text-white mb-1">Booking Confirmed in Database!</h2>
+                        <h2 className="text-xl font-bold text-white mb-1">Booking Confirmed!</h2>
                         <p className="text-xs text-gray-400 mb-6">
                             Verified reference ID: <span className="font-mono text-white font-bold">#{confirmedBooking.id}</span>
                         </p>
 
                         <div className="bg-[#090D14] border border-[#1e293b] rounded-xl p-5 max-w-md mx-auto mb-6 text-left text-xs">
+                            <div className="flex justify-between py-1.5 border-b border-[#151D2A]">
+                                <span className="text-gray-400">Customer</span>
+                                <span className="text-white font-semibold">{confirmedBooking.customer?.full_name}</span>
+                            </div>
                             <div className="flex justify-between py-1.5 border-b border-[#151D2A]">
                                 <span className="text-gray-400">Service</span>
                                 <span className="text-white font-semibold">{confirmedBooking.service?.name}</span>
@@ -178,18 +178,18 @@ export default function DashboardPage() {
                             <div className="flex justify-between py-1.5 border-b border-[#151D2A]">
                                 <span className="text-gray-400">Vehicle</span>
                                 <span className="text-white font-semibold">
-                                    {confirmedBooking.vehicle?.year} {confirmedBooking.vehicle?.make} {confirmedBooking.vehicle?.model}
+                                    {confirmedBooking.vehicle?.year} {confirmedBooking.vehicle?.make} {confirmedBooking.vehicle?.model} ({confirmedBooking.vehicle?.registration})
                                 </span>
                             </div>
                             <div className="flex justify-between py-1.5 border-b border-[#151D2A]">
                                 <span className="text-gray-400">Scheduled Time</span>
                                 <span className="text-white font-mono">
-                                    {new Date(confirmedBooking.scheduled_at).toLocaleString()}
+                                    {new Date(confirmedBooking.scheduled_at).toUTCString()}
                                 </span>
                             </div>
                             <div className="flex justify-between py-1.5">
-                                <span className="text-gray-400">Initial Status</span>
-                                <span className="text-blue-400 font-bold uppercase">{confirmedBooking.status}</span>
+                                <span className="text-gray-400">Price</span>
+                                <span className="text-emerald-400 font-bold">Rs. {confirmedBooking.service?.base_price}</span>
                             </div>
                         </div>
 
@@ -214,271 +214,327 @@ export default function DashboardPage() {
                     </div>
                 ) : (
                     <>
-                        {/* Step Progress Bar - Clean & Professional */}
-                <div className="mb-8">
-                    <div className="flex items-center justify-between text-xs font-semibold mb-2">
-                        <span className={step >= 1 ? "text-[#2563EB]" : "text-gray-500"}>1. Vehicle</span>
-                        <span className={step >= 2 ? "text-[#2563EB]" : "text-gray-500"}>2. Workshop Service</span>
-                        <span className={step >= 3 ? "text-[#2563EB]" : "text-gray-500"}>3. Date & Confirm</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <div className={`flex-1 h-1 rounded-full transition-colors ${step >= 1 ? "bg-[#2563EB]" : "bg-[#1e293b]"}`} />
-                        <div className={`flex-1 h-1 rounded-full transition-colors ${step >= 2 ? "bg-[#2563EB]" : "bg-[#1e293b]"}`} />
-                        <div className={`flex-1 h-1 rounded-full transition-colors ${step >= 3 ? "bg-[#2563EB]" : "bg-[#1e293b]"}`} />
-                    </div>
-                </div>
-
-                {message && (
-                    <div className={`p-3 text-xs mb-6 rounded-md ${message.includes('Error') ? 'bg-red-500/10 text-red-400 border border-red-500/30' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'}`}>
-                        {message}
-                    </div>
-                )}
-
-                {/* STEP 1: SELECT VEHICLE */}
-                {step === 1 && (
-                    <div>
-                        <h2 className="text-base font-bold text-white mb-2">Step 1: Select your vehicle</h2>
-                        <p className="text-xs text-gray-400 mb-4">Choose which vehicle from your garage needs service.</p>
-
-                        {vehicles.length === 0 && !showAddCar ? (
-                            <div className="text-center p-6 bg-[#090D14] rounded-lg border border-[#1e293b]">
-                                <p className="text-gray-400 mb-4 text-xs">You don't have any vehicles registered.</p>
-                                <button onClick={() => setShowAddCar(true)} className="bg-[#2563EB] hover:bg-blue-700 text-white px-5 py-2 rounded-md text-xs font-bold transition-colors">
-                                    + Add a Vehicle
-                                </button>
+                        {/* Step Progress Bar */}
+                        <div className="mb-8">
+                            <div className="flex items-center justify-between text-xs font-semibold mb-2">
+                                <span className={step >= 1 ? "text-[#2563EB]" : "text-gray-500"}>1. Customer & Vehicle</span>
+                                <span className={step >= 2 ? "text-[#2563EB]" : "text-gray-500"}>2. Workshop Service</span>
+                                <span className={step >= 3 ? "text-[#2563EB]" : "text-gray-500"}>3. Date & Confirm</span>
                             </div>
-                        ) : showAddCar ? (
-                            <form onSubmit={handleAddCar} className="bg-[#090D14] p-4 rounded-lg border border-[#1e293b] mb-4 flex flex-col gap-3">
-                                <div className="grid grid-cols-2 gap-3">
-                                    <input placeholder="Make (e.g. Toyota)" value={newCar.make} onChange={e => setNewCar({ ...newCar, make: e.target.value })} className="p-2 bg-[#151D2A] border border-[#1e293b] rounded text-white text-xs outline-none focus:border-[#2563EB]" required />
-                                    <input placeholder="Model (e.g. Corolla)" value={newCar.model} onChange={e => setNewCar({ ...newCar, model: e.target.value })} className="p-2 bg-[#151D2A] border border-[#1e293b] rounded text-white text-xs outline-none focus:border-[#2563EB]" required />
-                                    <input type="number" placeholder="Year" value={newCar.year} onChange={e => setNewCar({ ...newCar, year: e.target.value })} className="p-2 bg-[#151D2A] border border-[#1e293b] rounded text-white text-xs outline-none focus:border-[#2563EB]" required />
-                                    <input placeholder="Reg (ABC-123)" value={newCar.registration} onChange={e => setNewCar({ ...newCar, registration: e.target.value })} className="p-2 bg-[#151D2A] border border-[#1e293b] rounded text-white text-xs outline-none focus:border-[#2563EB]" required />
+                            <div className="flex items-center gap-2">
+                                <div className={`flex-1 h-1 rounded-full transition-colors ${step >= 1 ? "bg-[#2563EB]" : "bg-[#1e293b]"}`} />
+                                <div className={`flex-1 h-1 rounded-full transition-colors ${step >= 2 ? "bg-[#2563EB]" : "bg-[#1e293b]"}`} />
+                                <div className={`flex-1 h-1 rounded-full transition-colors ${step >= 3 ? "bg-[#2563EB]" : "bg-[#1e293b]"}`} />
+                            </div>
+                        </div>
+
+                        {message && (
+                            <div className={`p-3 text-xs mb-6 rounded-md ${message.includes("Error") ? "bg-red-500/10 text-red-400 border border-red-500/30" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"}`}>
+                                {message}
+                            </div>
+                        )}
+
+                        {/* STEP 1: CUSTOMER & VEHICLE FORM */}
+                        {step === 1 && (
+                            <form onSubmit={handleStep1Submit} className="space-y-6">
+                                <div>
+                                    <h2 className="text-base font-bold text-white mb-1">Step 1: Your Details & Vehicle</h2>
+                                    <p className="text-xs text-gray-400 mb-4">No account required. Enter your contact details and car specs for booking confirmation.</p>
                                 </div>
-                                <div className="flex gap-2 mt-2">
-                                    <button type="submit" className="bg-[#2563EB] hover:bg-blue-700 text-white px-4 py-2 rounded text-xs font-bold flex-1 transition-colors">Save Vehicle</button>
-                                    <button type="button" onClick={() => setShowAddCar(false)} className="border border-[#1e293b] text-gray-400 px-4 py-2 rounded text-xs hover:text-white">Cancel</button>
+
+                                {/* Customer Details */}
+                                <div className="bg-[#090D14] border border-[#1e293b] rounded-lg p-5">
+                                    <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">1. Contact Information</h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                        <div>
+                                            <label className="block text-[11px] text-gray-400 mb-1">Full Name <span className="text-red-400">*</span></label>
+                                            <input
+                                                type="text"
+                                                placeholder="e.g. Tariq Khan"
+                                                value={guest.customer_name}
+                                                onChange={(e) => setGuest({ ...guest, customer_name: e.target.value })}
+                                                className="w-full p-2.5 bg-[#151D2A] border border-[#1e293b] rounded text-white text-xs outline-none focus:border-[#2563EB]"
+                                                required
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-gray-400 mb-1">Email Address <span className="text-red-400">*</span></label>
+                                            <input
+                                                type="email"
+                                                placeholder="tariq@example.com"
+                                                value={guest.customer_email}
+                                                onChange={(e) => setGuest({ ...guest, customer_email: e.target.value })}
+                                                className="w-full p-2.5 bg-[#151D2A] border border-[#1e293b] rounded text-white text-xs outline-none focus:border-[#2563EB]"
+                                                required
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-gray-400 mb-1">Phone Number <span className="text-red-400">*</span></label>
+                                            <input
+                                                type="tel"
+                                                placeholder="+92 300 1234567"
+                                                value={guest.customer_phone}
+                                                onChange={(e) => setGuest({ ...guest, customer_phone: e.target.value })}
+                                                className="w-full p-2.5 bg-[#151D2A] border border-[#1e293b] rounded text-white text-xs outline-none focus:border-[#2563EB]"
+                                                required
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Vehicle Details */}
+                                <div className="bg-[#090D14] border border-[#1e293b] rounded-lg p-5">
+                                    <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">2. Vehicle Specifications</h3>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                        <div>
+                                            <label className="block text-[11px] text-gray-400 mb-1">Make <span className="text-red-400">*</span></label>
+                                            <input
+                                                type="text"
+                                                placeholder="e.g. Toyota"
+                                                value={guest.vehicle_make}
+                                                onChange={(e) => setGuest({ ...guest, vehicle_make: e.target.value })}
+                                                className="w-full p-2.5 bg-[#151D2A] border border-[#1e293b] rounded text-white text-xs outline-none focus:border-[#2563EB]"
+                                                required
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-gray-400 mb-1">Model <span className="text-red-400">*</span></label>
+                                            <input
+                                                type="text"
+                                                placeholder="e.g. Corolla"
+                                                value={guest.vehicle_model}
+                                                onChange={(e) => setGuest({ ...guest, vehicle_model: e.target.value })}
+                                                className="w-full p-2.5 bg-[#151D2A] border border-[#1e293b] rounded text-white text-xs outline-none focus:border-[#2563EB]"
+                                                required
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-gray-400 mb-1">Year <span className="text-red-400">*</span></label>
+                                            <input
+                                                type="number"
+                                                placeholder="e.g. 2021"
+                                                min="1980"
+                                                max="2030"
+                                                value={guest.vehicle_year}
+                                                onChange={(e) => setGuest({ ...guest, vehicle_year: e.target.value })}
+                                                className="w-full p-2.5 bg-[#151D2A] border border-[#1e293b] rounded text-white text-xs outline-none focus:border-[#2563EB]"
+                                                required
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[11px] text-gray-400 mb-1">Reg / Plate # <span className="text-red-400">*</span></label>
+                                            <input
+                                                type="text"
+                                                placeholder="e.g. ABC-1234"
+                                                value={guest.vehicle_registration}
+                                                onChange={(e) => setGuest({ ...guest, vehicle_registration: e.target.value })}
+                                                className="w-full p-2.5 bg-[#151D2A] border border-[#1e293b] rounded text-white text-xs outline-none focus:border-[#2563EB]"
+                                                required
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="flex justify-end pt-2">
+                                    <button
+                                        type="submit"
+                                        className="h-10 px-6 rounded-lg bg-[#2563EB] hover:bg-blue-700 text-white text-xs font-bold transition-colors flex items-center justify-center shadow-md shadow-blue-900/20"
+                                    >
+                                        Continue to Service →
+                                    </button>
                                 </div>
                             </form>
-                        ) : (
-                            <div className="grid gap-3">
-                                {vehicles.map((v: any) => {
-                                    const isSelected = selectedVehicle === v.id.toString();
-                                    return (
-                                        <div
-                                            key={v.id}
-                                            onClick={() => setSelectedVehicle(v.id.toString())}
-                                            className={`p-4 rounded-lg border cursor-pointer transition-all ${
-                                                isSelected
-                                                    ? 'border-[#2563EB] bg-[#2563EB]/15'
-                                                    : 'border-[#1e293b] bg-[#090D14] hover:bg-[#1e293b] hover:border-gray-600'
-                                            }`}
-                                        >
-                                            <div className="flex justify-between items-center">
-                                                <div>
-                                                    <h3 className="font-bold text-white text-sm">{v.year} {v.make} {v.model}</h3>
-                                                    <p className="text-xs text-gray-400 font-mono mt-0.5">{v.registration}</p>
-                                                </div>
-                                                <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${isSelected ? 'border-[#2563EB] bg-[#2563EB]' : 'border-gray-600'}`}>
-                                                    {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                                <button onClick={() => setShowAddCar(true)} className="text-left text-xs text-[#2563EB] font-bold mt-1 hover:underline">+ Add another vehicle</button>
-                            </div>
                         )}
 
-                        {vehicles.length > 0 && !showAddCar && (
-                            <div className="flex justify-end mt-6">
-                                <button
-                                    onClick={() => setStep(2)}
-                                    className="h-10 px-6 rounded-lg bg-[#2563EB] hover:bg-blue-700 text-white text-xs font-bold transition-colors flex items-center justify-center shadow-md shadow-blue-900/20"
-                                >
-                                    Continue to Service →
-                                </button>
-                            </div>
-                        )}
-                    </div>
-                )}
+                        {/* STEP 2: SELECT WORKSHOP SERVICE */}
+                        {step === 2 && (
+                            <div>
+                                <div className="flex justify-between items-center mb-2">
+                                    <h2 className="text-base font-bold text-white">Step 2: Select Workshop Service</h2>
+                                    <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-[#2563EB]/15 text-[#2563EB] border border-[#2563EB]/30">Workshop Bay</span>
+                                </div>
+                                <p className="text-xs text-gray-400 mb-4">Choose a certified workshop bay service for your vehicle.</p>
 
-                {/* STEP 2: SELECT WORKSHOP SERVICE */}
-                {step === 2 && (
-                    <div>
-                        <div className="flex justify-between items-center mb-2">
-                            <h2 className="text-base font-bold text-white">Step 2: Select Workshop Service</h2>
-                            <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-[#2563EB]/15 text-[#2563EB] border border-[#2563EB]/30">Workshop Bay</span>
-                        </div>
-                        <p className="text-xs text-gray-400 mb-4">Choose a dedicated workshop bay service for your vehicle.</p>
-
-                        {services.length === 0 ? (
-                            <p className="text-xs text-gray-400 p-4 bg-[#090D14] rounded border border-[#1e293b]">No workshop services available at the moment.</p>
-                        ) : (
-                            <div className="grid gap-3 mb-6">
-                                {services.map((s: any) => {
-                                    const isSelected = selectedService === s.id.toString();
-                                    return (
-                                        <div
-                                            key={s.id}
-                                            onClick={() => setSelectedService(s.id.toString())}
-                                            className={`p-4 rounded-lg border cursor-pointer transition-all ${
-                                                isSelected
-                                                    ? "border-[#2563EB] bg-[#2563EB]/15"
-                                                    : "border-[#1e293b] bg-[#090D14] hover:bg-[#1e293b] hover:border-gray-600"
-                                            }`}
-                                        >
-                                            <div className="flex justify-between items-start">
-                                                <div>
-                                                    <h3 className="font-bold text-white text-sm">{s.name}</h3>
-                                                    <p className="text-xs text-gray-400 mt-1 max-w-lg">{s.description}</p>
-                                                </div>
-                                                <div className="text-right ml-4">
-                                                    <span className="text-sm font-black text-white">${s.base_price}</span>
-                                                    <p className="text-[11px] text-gray-500">{s.duration_minutes} min</p>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        )}
-
-                        <div className="flex items-center gap-3 mt-6">
-                            <button
-                                onClick={() => setStep(1)}
-                                className="h-10 px-5 rounded-lg border border-[#1e293b] text-gray-300 hover:text-white hover:bg-[#1e293b] text-xs font-semibold transition-colors flex items-center justify-center"
-                            >
-                                Back
-                            </button>
-                            <button
-                                onClick={() => setStep(3)}
-                                disabled={!selectedService}
-                                className="h-10 px-6 rounded-lg bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold transition-colors flex items-center justify-center flex-1 shadow-md shadow-blue-900/20"
-                            >
-                                Continue to Date & Time →
-                            </button>
-                        </div>
-                    </div>
-                )}
-
-                {/* STEP 3: DATE & CONFIRM */}
-                {step === 3 && (
-                    <form onSubmit={handleBook}>
-                        <h2 className="text-base font-bold text-white mb-2">Step 3: Schedule Date & Available Bay Slot</h2>
-                        <p className="text-xs text-gray-400 mb-6">Real-time workshop capacity directly verified against live bay availability.</p>
-
-                        {/* Date Picker */}
-                        <div className="mb-4">
-                            <label className="block text-xs font-medium text-gray-300 mb-1.5">Select Appointment Date <span className="text-red-400">*</span></label>
-                            <input
-                                type="date"
-                                value={selectedDay}
-                                min={new Date().toISOString().split("T")[0]}
-                                onChange={e => {
-                                    setSelectedDay(e.target.value);
-                                    setDate("");
-                                }}
-                                className="w-full p-2.5 bg-[#090D14] border border-[#1e293b] rounded-lg text-white text-xs outline-none focus:border-[#2563EB]"
-                                required
-                            />
-                        </div>
-
-                        {/* Real-time Slots Grid */}
-                        <div className="mb-6">
-                            <label className="block text-xs font-medium text-gray-300 mb-1.5">
-                                Select Available Workshop Bay Slot (09:00 - 18:00 UTC) <span className="text-red-400">*</span>
-                            </label>
-
-                            {loadingSlots ? (
-                                <p className="text-xs text-gray-400 py-3 bg-[#090D14] p-3 rounded-lg border border-[#1e293b]">Checking real-time bay capacity...</p>
-                            ) : slots.length === 0 ? (
-                                <p className="text-xs text-gray-400 py-3 bg-[#090D14] p-3 rounded-lg border border-[#1e293b]">Please select an appointment date above to view slots.</p>
-                            ) : (
-                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-48 overflow-y-auto p-1 bg-[#090D14] rounded-lg border border-[#1e293b]">
-                                    {slots.map((s: any, idx: number) => {
-                                        const startTimeStr = new Date(s.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
-                                        const endTimeStr = new Date(s.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
-                                        const isSelected = date === s.start_time;
-
-                                        if (!s.is_available) {
+                                {services.length === 0 ? (
+                                    <p className="text-xs text-gray-400 p-4 bg-[#090D14] rounded border border-[#1e293b]">No workshop services available at the moment.</p>
+                                ) : (
+                                    <div className="grid gap-3 mb-6">
+                                        {services.map((s: any) => {
+                                            const isSelected = selectedService === s.id.toString();
                                             return (
                                                 <div
-                                                    key={idx}
-                                                    className="p-2 rounded border border-[#1e293b]/60 bg-[#101827]/40 text-gray-500 opacity-60 text-center cursor-not-allowed"
-                                                    title={s.reason}
+                                                    key={s.id}
+                                                    onClick={() => setSelectedService(s.id.toString())}
+                                                    className={`p-4 rounded-lg border cursor-pointer transition-all ${
+                                                        isSelected
+                                                            ? "border-[#2563EB] bg-[#2563EB]/15"
+                                                            : "border-[#1e293b] bg-[#090D14] hover:bg-[#1e293b] hover:border-gray-600"
+                                                    }`}
                                                 >
-                                                    <p className="text-[11px] font-mono">{startTimeStr} - {endTimeStr}</p>
-                                                    <span className="text-[9px] text-red-400/80 uppercase font-bold block mt-0.5">
-                                                        {s.reason.includes("lead time") ? "< 2h lead" : s.reason.includes("past") ? "Past" : "Full"}
-                                                    </span>
+                                                    <div className="flex justify-between items-start">
+                                                        <div>
+                                                            <h3 className="font-bold text-white text-sm">{s.name}</h3>
+                                                            <p className="text-xs text-gray-400 mt-1 max-w-lg">{s.description}</p>
+                                                        </div>
+                                                        <div className="text-right ml-4">
+                                                            <span className="text-sm font-black text-white">Rs. {s.base_price}</span>
+                                                            <p className="text-[11px] text-gray-500">{s.duration_minutes} min</p>
+                                                        </div>
+                                                    </div>
                                                 </div>
                                             );
-                                        }
+                                        })}
+                                    </div>
+                                )}
 
-                                        return (
-                                            <button
-                                                type="button"
-                                                key={idx}
-                                                onClick={() => setDate(s.start_time)}
-                                                className={`p-2 rounded border text-center transition-all ${
-                                                    isSelected
-                                                        ? "border-[#2563EB] bg-[#2563EB]/20 text-white"
-                                                        : "border-[#1e293b] bg-[#151D2A] hover:bg-[#1e293b] text-gray-300"
-                                                }`}
-                                            >
-                                                <p className="text-[11px] font-mono font-bold">{startTimeStr} - {endTimeStr} UTC</p>
-                                                <span className="text-[9px] text-[#2563EB] font-semibold block mt-0.5">
-                                                    {s.remaining_capacity} bay{s.remaining_capacity > 1 ? "s" : ""} open
-                                                </span>
-                                            </button>
-                                        );
-                                    })}
+                                <div className="flex items-center gap-3 mt-6">
+                                    <button
+                                        type="button"
+                                        onClick={() => setStep(1)}
+                                        className="h-10 px-5 rounded-lg border border-[#1e293b] text-gray-300 hover:text-white hover:bg-[#1e293b] text-xs font-semibold transition-colors flex items-center justify-center"
+                                    >
+                                        Back
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setStep(3)}
+                                        disabled={!selectedService}
+                                        className="h-10 px-6 rounded-lg bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold transition-colors flex items-center justify-center flex-1 shadow-md shadow-blue-900/20"
+                                    >
+                                        Continue to Date & Time →
+                                    </button>
                                 </div>
-                            )}
-                        </div>
+                            </div>
+                        )}
 
-                        <div className="bg-[#090D14] p-4 rounded-lg border border-[#1e293b] mb-6 text-xs">
-                            <p className="text-gray-400 mb-2 font-medium">Workshop Booking Summary:</p>
-                            <div className="flex justify-between items-center py-1 border-b border-[#151D2A]">
-                                <span className="text-gray-400">Vehicle</span>
-                                <span className="text-white font-semibold">{selectedVehicleData?.year} {selectedVehicleData?.make} {selectedVehicleData?.model}</span>
-                            </div>
-                            <div className="flex justify-between items-center py-1 border-b border-[#151D2A]">
-                                <span className="text-gray-400">Service</span>
-                                <span className="text-white font-semibold">{services.find((s: any) => s.id.toString() === selectedService)?.name}</span>
-                            </div>
-                            <div className="flex justify-between items-center py-1 border-b border-[#151D2A]">
-                                <span className="text-gray-400">Selected Slot</span>
-                                <span className="text-white font-mono">{date ? new Date(date).toUTCString() : "Please choose a slot above"}</span>
-                            </div>
-                            <div className="flex justify-between items-center py-1">
-                                <span className="text-gray-400">Base Price</span>
-                                <span className="text-[#2563EB] font-bold">${services.find((s: any) => s.id.toString() === selectedService)?.base_price}</span>
-                            </div>
-                        </div>
+                        {/* STEP 3: DATE & CONFIRM */}
+                        {step === 3 && (
+                            <form onSubmit={handleBook}>
+                                <h2 className="text-base font-bold text-white mb-2">Step 3: Schedule Date & Time Slot</h2>
+                                <p className="text-xs text-gray-400 mb-6">Select your preferred appointment date and open workshop time slot.</p>
 
-                        <div className="flex items-center gap-3">
-                            <button
-                                type="button"
-                                onClick={() => setStep(2)}
-                                className="h-10 px-5 rounded-lg border border-[#1e293b] text-gray-300 hover:text-white hover:bg-[#1e293b] text-xs font-semibold transition-colors flex items-center justify-center"
-                            >
-                                Back
-                            </button>
-                            <button
-                                type="submit"
-                                disabled={!date}
-                                className="h-10 px-6 rounded-lg bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold transition-colors flex items-center justify-center flex-1 shadow-md shadow-blue-900/20"
-                            >
-                                Confirm Booking
-                            </button>
-                        </div>
-                    </form>
-                )}
+                                {/* Date Picker */}
+                                <div className="mb-4">
+                                    <label className="block text-xs font-medium text-gray-300 mb-1.5">
+                                        Select Appointment Date <span className="text-red-400">*</span>
+                                    </label>
+                                    <input
+                                        type="date"
+                                        value={selectedDay}
+                                        min={new Date().toISOString().split("T")[0]}
+                                        onChange={(e) => {
+                                            setSelectedDay(e.target.value);
+                                            setDate("");
+                                        }}
+                                        className="w-full p-2.5 bg-[#090D14] border border-[#1e293b] rounded-lg text-white text-xs outline-none focus:border-[#2563EB]"
+                                        required
+                                    />
+                                </div>
+
+                                {/* Clean Slots Grid (No bay capacity text, clean time slot display) */}
+                                <div className="mb-6">
+                                    <label className="block text-xs font-medium text-gray-300 mb-1.5">
+                                        Select Available Time Slot (UTC) <span className="text-red-400">*</span>
+                                    </label>
+
+                                    {loadingSlots ? (
+                                        <p className="text-xs text-gray-400 py-3 bg-[#090D14] p-3 rounded-lg border border-[#1e293b]">Checking slot availability...</p>
+                                    ) : slots.length === 0 ? (
+                                        <p className="text-xs text-gray-400 py-3 bg-[#090D14] p-3 rounded-lg border border-[#1e293b]">Please select an appointment date above to view slots.</p>
+                                    ) : (
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-56 overflow-y-auto p-1 bg-[#090D14] rounded-lg border border-[#1e293b]">
+                                            {slots.map((s: any, idx: number) => {
+                                                const start = new Date(s.start_time);
+                                                const end = new Date(s.end_time);
+                                                const startTimeStr = start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
+                                                const endTimeStr = end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
+                                                const isSelected = date === s.start_time;
+
+                                                if (!s.is_available) {
+                                                    return (
+                                                        <div
+                                                            key={idx}
+                                                            className="p-2.5 rounded border border-[#1e293b]/60 bg-[#101827]/40 text-gray-500 opacity-60 text-center cursor-not-allowed"
+                                                            title={s.reason}
+                                                        >
+                                                            <p className="text-xs font-mono">{startTimeStr} - {endTimeStr} UTC</p>
+                                                            <span className="text-[9px] text-red-400/80 uppercase font-bold block mt-0.5">
+                                                                {s.reason.includes("lead time") ? "< 2h lead" : s.reason.includes("past") ? "Past" : "Booked"}
+                                                            </span>
+                                                        </div>
+                                                    );
+                                                }
+
+                                                return (
+                                                    <button
+                                                        type="button"
+                                                        key={idx}
+                                                        onClick={() => setDate(s.start_time)}
+                                                        className={`p-2.5 rounded border text-center transition-all ${
+                                                            isSelected
+                                                                ? "border-[#2563EB] bg-[#2563EB]/20 text-white font-bold"
+                                                                : "border-[#1e293b] bg-[#151D2A] hover:bg-[#1e293b] text-gray-300"
+                                                        }`}
+                                                    >
+                                                        <p className="text-xs font-mono font-medium">{startTimeStr} - {endTimeStr} UTC</p>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Booking Summary */}
+                                <div className="bg-[#090D14] p-4 rounded-lg border border-[#1e293b] mb-6 text-xs">
+                                    <p className="text-gray-400 mb-2 font-medium">Appointment Summary:</p>
+                                    <div className="flex justify-between items-center py-1 border-b border-[#151D2A]">
+                                        <span className="text-gray-400">Customer</span>
+                                        <span className="text-white font-semibold">{guest.customer_name} ({guest.customer_phone})</span>
+                                    </div>
+                                    <div className="flex justify-between items-center py-1 border-b border-[#151D2A]">
+                                        <span className="text-gray-400">Email (Confirmation)</span>
+                                        <span className="text-white font-mono">{guest.customer_email}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center py-1 border-b border-[#151D2A]">
+                                        <span className="text-gray-400">Vehicle</span>
+                                        <span className="text-white font-semibold">
+                                            {guest.vehicle_year} {guest.vehicle_make} {guest.vehicle_model} ({guest.vehicle_registration})
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between items-center py-1 border-b border-[#151D2A]">
+                                        <span className="text-gray-400">Service</span>
+                                        <span className="text-white font-semibold">{selectedServiceData?.name}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center py-1 border-b border-[#151D2A]">
+                                        <span className="text-gray-400">Selected Slot</span>
+                                        <span className="text-white font-mono">{date ? new Date(date).toUTCString() : "Please select a slot above"}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center py-1">
+                                        <span className="text-gray-400">Base Price</span>
+                                        <span className="text-emerald-400 font-bold text-sm">Rs. {selectedServiceData?.base_price}</span>
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => setStep(2)}
+                                        className="h-10 px-5 rounded-lg border border-[#1e293b] text-gray-300 hover:text-white hover:bg-[#1e293b] text-xs font-semibold transition-colors flex items-center justify-center"
+                                    >
+                                        Back
+                                    </button>
+                                    <button
+                                        type="submit"
+                                        disabled={!date || submitting}
+                                        className="h-10 px-6 rounded-lg bg-[#2563EB] hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-bold transition-colors flex items-center justify-center flex-1 shadow-md shadow-blue-900/20"
+                                    >
+                                        {submitting ? "Confirming Booking..." : "Confirm Booking"}
+                                    </button>
+                                </div>
+                            </form>
+                        )}
                     </>
                 )}
-
             </div>
         </main>
     );

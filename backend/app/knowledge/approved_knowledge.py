@@ -37,8 +37,8 @@ APPROVED_DOCUMENTS = [
         "category": "roadside",
         "content": (
             "Roadside assistance operates 24 hours a day, 7 days a week, 365 days a year across all regional roadways. "
-            "Average response dispatch time is 25 minutes. Core emergency services include 24/7 Flatbed Towing ($69.99, covering up to 30 km) "
-            "and Rapid Jump-Start & Emergency Fuel Delivery ($29.99, including up to 5 liters of fuel). Flat tyre mounting, lockout assistance, "
+            "Average response dispatch time is 25 minutes. Core emergency services include 24/7 Flatbed Towing (Rs. 69.99, covering up to 30 km) "
+            "and Rapid Jump-Start & Emergency Fuel Delivery (Rs. 29.99, including up to 5 liters of fuel). Flat tyre mounting, lockout assistance, "
             "and overheating diagnosis are also provided. Emergency requests must be submitted directly through the /emergency portal with live GPS coordinates, "
             "or phoned in to our priority dispatch switchboard at +92 300 0000000. All dispatch incidents are assigned unique tracking IDs (#CA-EMERG-{id}) "
             "with real-time mechanic assignment and live progress streaming."

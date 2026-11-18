@@ -97,7 +97,7 @@ export default function MyBookingsPage() {
                                         <td className="px-6 py-4 text-white font-medium text-xs">
                                             {b.service?.name}
                                             <span className="block text-[10px] text-gray-400">
-                                                ${b.service?.base_price} · {b.service?.service_type}
+                                                Rs. {b.service?.base_price} · {b.service?.service_type}
                                             </span>
                                         </td>
                                         <td className="px-6 py-4 text-xs">

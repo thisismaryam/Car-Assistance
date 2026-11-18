@@ -200,7 +200,7 @@ export default function ChatWidget() {
                                     {/* Operational Branch Tag */}
                                     {m.branch && (
                                         <span className="text-[9px] text-gray-500 mt-0.5 px-1 font-mono uppercase">
-                                            {m.branch === "grounded_rag" ? "📘 Grounded RAG" : m.branch === "live_backend_tool" ? "⚡ Live Backend Tool" : "🛡️ Core Booking Flow"}
+                                            {m.branch === "groq_llm" ? "🤖 Groq LLM" : m.branch === "grounded_rag" ? "📘 Grounded RAG" : m.branch === "live_backend_tool" ? "⚡ Live Backend Tool" : "🛡️ Core Booking Flow"}
                                         </span>
                                     )}
                                 </div>

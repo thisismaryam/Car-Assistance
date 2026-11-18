@@ -29,47 +29,72 @@ export default function LoginPage() {
 
             const data = await res.json();
             localStorage.setItem("token", data.access_token);
-            router.push("/dashboard");
-        } catch (err: any) {
-            setError(err.message);
+
+            try {
+                const meRes = await fetch("http://localhost:8000/auth/me", {
+                    headers: { Authorization: `Bearer ${data.access_token}` },
+                });
+                if (meRes.ok) {
+                    const me = await meRes.json();
+                    if (me.role === "admin" || me.role === "mechanic") {
+                        router.push("/admin");
+                        return;
+                    }
+                }
+            } catch {}
+            router.push("/admin");
+        } catch (err: unknown) {
+            setError(err instanceof Error ? err.message : "Unable to sign in. Please try again.");
         }
     };
 
     return (
-        <main className="flex min-h-[80vh] flex-col items-center justify-center p-6">
-            <div className="w-full max-w-md bg-[#1a1c1e] border border-gray-800 p-8 rounded-xl shadow-2xl">
-                <h1 className="text-3xl font-bold mb-2 text-white text-center">Welcome Back</h1>
-                <p className="text-gray-400 text-center mb-8">Log in to manage your bookings</p>
+        <main className="auth-shell">
+            <div className="auth-card">
+                <div className="brand-mark mx-auto mb-7">CA</div>
+                <p className="eyebrow justify-center">Operations access</p>
+                <h1 className="mt-4 mb-2 text-center font-serif text-3xl font-normal text-white">Welcome back.</h1>
+                <p className="mb-8 text-center text-xs leading-6 text-gray-400">
+                    Staff access for administrators and mechanics.
+                </p>
 
-                {error && <p className="text-red-500 mb-4 text-center bg-red-500/10 py-2 rounded">{error}</p>}
+                {error && <p className="mb-4 border border-red-500/20 bg-red-500/10 py-2.5 text-center text-xs text-red-400" role="alert">{error}</p>}
 
-                <form onSubmit={handleLogin} className="flex flex-col gap-5">
-                    <input
-                        type="email"
-                        placeholder="Email Address"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        className="p-3.5 rounded-md bg-[#17191B] text-white border border-gray-700 focus:outline-none focus:border-[#F07835] transition-colors"
-                        required
-                    />
-                    <input
-                        type="password"
-                        placeholder="Password"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        className="p-3.5 rounded-md bg-[#17191B] text-white border border-gray-700 focus:outline-none focus:border-[#F07835] transition-colors"
-                        required
-                    />
+                <form onSubmit={handleLogin} className="flex flex-col gap-4">
+                    <div>
+                        <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-400">Staff email</label>
+                        <input
+                            type="email"
+                            placeholder="staff@carassistance.com"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            className="w-full border border-[#1e293b] bg-[#090D14] p-3.5 text-sm text-white placeholder:text-gray-600 focus:border-[#8DA6B8] focus:outline-none"
+                            required
+                        />
+                    </div>
+                    <div>
+                        <label className="mb-2 block text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-400">Password</label>
+                        <input
+                            type="password"
+                            placeholder="••••••••"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            className="w-full border border-[#1e293b] bg-[#090D14] p-3.5 text-sm text-white placeholder:text-gray-600 focus:border-[#8DA6B8] focus:outline-none"
+                            required
+                        />
+                    </div>
                     <button
                         type="submit"
-                        className="bg-[#F07835] hover:bg-orange-600 text-white font-bold py-3.5 rounded-md mt-2 transition-colors"
+                        className="button-steel mt-3 w-full"
                     >
-                        Log In
+                        Sign in to operations
                     </button>
                 </form>
-                <p className="text-center text-gray-500 mt-6 text-sm">
-                    Don't have an account? <span className="text-[#F07835] cursor-pointer hover:underline">Register here</span>
-                </p>
+                <div className="mt-7 border-t border-[#1e293b] pt-5 text-center">
+                    <Link href="/" className="text-[10px] font-semibold uppercase tracking-[0.1em] text-gray-400 hover:text-white">
+                        ← Return to main site
+                    </Link>
+                </div>
             </div>
         </main>
     );

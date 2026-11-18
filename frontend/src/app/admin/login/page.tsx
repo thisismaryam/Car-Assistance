@@ -30,32 +30,54 @@ export default function AdminLoginPage() {
             const data = await res.json();
             localStorage.setItem("token", data.access_token);
             router.push("/admin"); // Go to admin dashboard
-        } catch (err: any) {
-            setError(err.message);
+        } catch (err: unknown) {
+            setError(err instanceof Error ? err.message : "Unable to sign in. Please try again.");
         }
     };
 
     return (
-        <main className="flex min-h-screen flex-col items-center justify-center p-6 bg-[#0B0D10]">
-            <div className="w-full max-w-sm bg-[#14171F] border border-[#222733] p-8 rounded-xl shadow-2xl relative">
-                <div className="absolute top-0 left-0 w-full h-1 bg-[#2E64FE] rounded-t-xl" />
+        <main className="auth-shell">
+            <div className="auth-card">
+                <div className="brand-mark mx-auto mb-7">CA</div>
+                <p className="eyebrow justify-center">Restricted access</p>
+                <h1 className="mt-4 mb-2 text-center font-serif text-3xl font-normal text-white">Operations portal.</h1>
+                <p className="mb-8 text-center text-xs leading-6 text-gray-400">Sign in to manage service operations.</p>
 
-                <h1 className="text-2xl font-bold mb-2 text-white text-center">Admin Portal</h1>
-                <p className="text-[#9CA3AF] text-sm text-center mb-8">Staff access only</p>
-
-                {error && <p className="text-red-500 mb-4 text-sm text-center bg-red-500/10 py-2 rounded">{error}</p>}
+                {error && <p className="mb-4 border border-red-500/30 bg-red-500/10 py-2 text-center text-sm text-red-400" role="alert">{error}</p>}
 
                 <form onSubmit={handleLogin} className="flex flex-col gap-4">
-                    <input type="email" placeholder="Admin Email" value={email} onChange={(e) => setEmail(e.target.value)} className="p-3 text-sm rounded-md bg-[#0B0D10] text-white border border-[#222733] focus:border-[#2E64FE] outline-none" required />
-                    <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="p-3 text-sm rounded-md bg-[#0B0D10] text-white border border-[#222733] focus:border-[#2E64FE] outline-none" required />
-                    <button type="submit" className="bg-[#2E64FE] hover:bg-[#1D4ED8] text-white font-bold py-3 rounded-md mt-2 text-sm transition-colors">
-                        Authenticate
+                    <label className="text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-400">
+                        Admin email
+                        <input
+                            type="email"
+                            placeholder="admin@carassistance.com"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            className="mt-2 w-full border border-[#222733] bg-[#0B0D10] p-3.5 text-sm text-white placeholder:text-gray-600 outline-none focus:border-[#8DA6B8]"
+                            required
+                        />
+                    </label>
+                    <label className="text-[10px] font-semibold uppercase tracking-[0.12em] text-gray-400">
+                        Password
+                        <input
+                            type="password"
+                            placeholder="••••••••"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            className="mt-2 w-full border border-[#222733] bg-[#0B0D10] p-3.5 text-sm text-white placeholder:text-gray-600 outline-none focus:border-[#8DA6B8]"
+                            required
+                        />
+                    </label>
+                    <button type="submit" className="button-steel mt-3 w-full">
+                        Sign in to operations
                     </button>
                 </form>
 
-                <p className="text-center text-[#9CA3AF] mt-6 text-xs">
-                    <Link href="/login" className="hover:text-white transition-colors">Return to Customer Login</Link>
-                </p>
+                <div className="mt-7 border-t border-[#1e293b] pt-5 text-center">
+                    <Link href="/login" className="text-[10px] font-semibold uppercase tracking-[0.1em] text-gray-400 hover:text-white">
+                        Return to staff sign in
+                    </Link>
+                </div>
             </div>
         </main>
     );
