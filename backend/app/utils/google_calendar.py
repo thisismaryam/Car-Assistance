@@ -91,8 +91,11 @@ def build_event_body(booking, customer, service, vehicle) -> dict:
 def create_booking_event(booking, customer, service, vehicle) -> str | None:
     """Create the event + email the invitation. Returns the Google event id, or None."""
     if not is_configured():
-        logger.info(
-            "Google Calendar not configured; skipping invite for booking #%s", booking.id)
+        missing = [n for n in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN")
+                   if not getattr(settings, n)]
+        logger.warning(
+            "Google Calendar skipped for booking #%s: missing %s in backend/.env",
+            booking.id, ", ".join(missing))
         return None
     if not customer or not customer.email:
         return None

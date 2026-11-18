@@ -1,19 +1,21 @@
-import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+
+from app.core.config import settings
 
 
 def send_email(to_email: str, subject: str, body: str) -> bool:
     """
     Sends an email using Python's smtplib.
-    Uses SMTP_EMAIL and SMTP_PASSWORD from environment variables.
+    Uses SMTP_EMAIL / SMTP_PASSWORD / SMTP_HOST / SMTP_PORT from backend/.env (via settings).
     If credentials are not set, logs the notification cleanly (simulation mode).
     """
-    smtp_email = os.getenv("SMTP_EMAIL")
-    smtp_password = os.getenv("SMTP_PASSWORD")
-    smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_email = settings.SMTP_EMAIL
+    # Gmail shows app passwords as "abcd efgh ijkl mnop"; the spaces must not be sent.
+    smtp_password = (settings.SMTP_PASSWORD or "").replace(" ", "")
+    smtp_host = settings.SMTP_HOST
+    smtp_port = settings.SMTP_PORT
 
     if not smtp_email or not smtp_password:
         print(f"\n[EMAIL NOTIFICATION (Simulated - No SMTP credentials set)]")

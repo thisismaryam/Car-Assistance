@@ -162,7 +162,7 @@ export default function HomeServicePage() {
                 throw new Error("Server error: database confirmation record was not returned.");
             }
             try {
-                localStorage.setItem(
+                sessionStorage.setItem(
                     "guest_contact",
                     JSON.stringify({ email: payload.customer_email, phone: payload.customer_phone })
                 );

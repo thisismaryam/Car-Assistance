@@ -168,7 +168,7 @@ export default function WorkshopBookingPage() {
             }
 
             try {
-                localStorage.setItem(
+                sessionStorage.setItem(
                     "guest_contact",
                     JSON.stringify({ email: payload.customer_email, phone: payload.customer_phone }),
                 );

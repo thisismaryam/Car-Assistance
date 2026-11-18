@@ -64,7 +64,10 @@ def create_booking(
 ):
     # 1. Resolve or create user (Guest Booking Support)
     user = None
-    if payload.customer_email and payload.customer_email.strip():
+    if current_user:
+        # A logged-in user always books for themselves, whatever email is typed in the form.
+        user = current_user
+    elif payload.customer_email and payload.customer_email.strip():
         email_clean = payload.customer_email.strip().lower()
         user = db.query(User).filter(
             func.lower(User.email) == email_clean).first()
@@ -86,8 +89,6 @@ def create_booking(
             if payload.customer_phone and not user.phone:
                 user.phone = payload.customer_phone.strip()
             db.flush()
-    elif current_user:
-        user = current_user
     else:
         raise HTTPException(
             status_code=400,
@@ -261,21 +262,24 @@ def create_booking(
     db.commit()
     db.refresh(booking)
 
-    # 10b. Google Calendar invitation (best-effort; never fails the booking)
+    # 10b. Google Calendar event on the business calendar; the customer is invited by email.
+    #      Best-effort: a calendar failure never fails the booking.
     event_id = create_booking_event(booking, user, service, vehicle)
     if event_id:
         booking.google_event_id = event_id
         db.commit()
         db.refresh(booking)
 
-    # 11. Send Confirmation Email to the Customer
+    # 11. Confirmation email, sent AFTER the calendar step so it can say whether the
+    #     event was added. Sent even if the calendar failed.
     try:
         recipient_email = user.email or payload.customer_email
         if recipient_email:
             sched_str = booking.scheduled_at.strftime('%Y-%m-%d %H:%M UTC')
+            state = "confirmed" if initial_status == BookingStatus.ASSIGNED else "received"
             email_body = (
                 f"Hello {user.full_name},\n\n"
-                f"Your booking for {service.name} has been received and confirmed.\n\n"
+                f"Your booking for {service.name} has been {state}.\n\n"
                 f"Booking ID: #{booking.id}\n"
                 f"Vehicle: {vehicle.year} {vehicle.make} {vehicle.model} ({vehicle.registration})\n"
                 f"Scheduled Time: {sched_str}\n"
@@ -283,6 +287,9 @@ def create_booking(
             )
             if booking.address:
                 email_body += f"Service Address: {booking.address}\n"
+            if event_id:
+                email_body += ("\nA Google Calendar invitation has also been sent to this "
+                               "address - accept it to add the appointment to your calendar.\n")
             email_body += "\nThank you for choosing Car Assistance!\nCar Assistance Team"
             send_email(
                 to_email=recipient_email,
@@ -388,30 +395,51 @@ def get_all_bookings(db: Session = Depends(get_db), admin: User = Depends(requir
     )
 
 
+_BOOKING_LOADERS = (
+    joinedload(Booking.customer),
+    joinedload(Booking.vehicle),
+    joinedload(Booking.service),
+    joinedload(Booking.mechanic),
+)
+
+
 @router.get("/{booking_id}", response_model=BookingRead)
 def get_booking_by_id(
     booking_id: int,
     db: Session = Depends(get_db),
-    current_user: User | None = Depends(get_optional_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    FEATURE 6: Direct verified booking details endpoint.
-    Retrieves full verified records from the database.
-    """
-    query = (
-        db.query(Booking)
-        .options(
-            joinedload(Booking.customer),
-            joinedload(Booking.vehicle),
-            joinedload(Booking.service),
-            joinedload(Booking.mechanic)
-        )
-        .filter(Booking.id == booking_id)
-    )
-    if current_user and current_user.role != UserRole.ADMIN:
+    """Booking details for the owner (or an admin). Guests use POST /{id}/view."""
+    query = db.query(Booking).options(*_BOOKING_LOADERS).filter(Booking.id == booking_id)
+    if current_user.role != UserRole.ADMIN:
         query = query.filter(Booking.customer_id == current_user.id)
 
     booking = query.first()
+    if not booking:
+        raise HTTPException(
+            status_code=404, detail="Booking not found or not authorized")
+    return booking
+
+
+@router.post("/{booking_id}/view", response_model=BookingRead)
+@limiter.limit("20/minute")
+def view_booking_as_guest(
+    request: Request,
+    booking_id: int,
+    payload: BookingLookup,
+    db: Session = Depends(get_db),
+):
+    """Guest booking details: the booking must belong to the customer whose email AND phone match."""
+    email_clean = payload.email.strip().lower()
+    user = db.query(User).filter(func.lower(User.email) == email_clean).first()
+    phone_key = _phone_key(payload.phone)
+    booking = None
+    if user and len(phone_key) >= 7 and _phone_key(user.phone) == phone_key:
+        booking = (
+            db.query(Booking).options(*_BOOKING_LOADERS)
+            .filter(Booking.id == booking_id, Booking.customer_id == user.id)
+            .first()
+        )
     if not booking:
         raise HTTPException(
             status_code=404, detail="Booking not found or not authorized")

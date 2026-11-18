@@ -26,7 +26,23 @@ export default function BookingDetailsPage() {
         }
 
         try {
-            const res = await fetch(`http://localhost:8000/bookings/${bookingId}`, { headers });
+            let res: Response;
+            if (token) {
+                res = await fetch(`http://localhost:8000/bookings/${bookingId}`, { headers });
+            } else {
+                let contact: any = null;
+                try {
+                    contact = JSON.parse(sessionStorage.getItem("guest_contact") || "null");
+                } catch { }
+                if (!contact?.email || !contact?.phone) {
+                    throw new Error("Please look up your bookings with your email and phone first.");
+                }
+                res = await fetch(`http://localhost:8000/bookings/${bookingId}/view`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(contact),
+                });
+            }
 
             if (!res.ok) {
                 if (res.status === 404) {

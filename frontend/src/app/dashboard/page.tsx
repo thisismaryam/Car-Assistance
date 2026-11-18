@@ -50,14 +50,14 @@ export default function MyBookingsPage() {
             setBookings(Array.isArray(data) ? data : []);
             setContact(c);
             try {
-                localStorage.setItem("guest_contact", JSON.stringify(c));
+                sessionStorage.setItem("guest_contact", JSON.stringify(c));
             } catch { }
         } catch (err: any) {
             setContact(null);
             setBookings([]);
             setError(err.message || "Could not load bookings.");
             try {
-                localStorage.removeItem("guest_contact");
+                sessionStorage.removeItem("guest_contact");
             } catch { }
         } finally {
             setLoading(false);
@@ -81,7 +81,7 @@ export default function MyBookingsPage() {
     useEffect(() => {
         let saved: Contact | null = null;
         try {
-            const raw = localStorage.getItem("guest_contact");
+            const raw = sessionStorage.getItem("guest_contact");
             if (raw) saved = JSON.parse(raw);
         } catch { }
 
@@ -103,7 +103,7 @@ export default function MyBookingsPage() {
 
     const switchUser = () => {
         try {
-            localStorage.removeItem("guest_contact");
+            sessionStorage.removeItem("guest_contact");
         } catch { }
         setContact(null);
         setBookings([]);
