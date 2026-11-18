@@ -74,7 +74,7 @@ export default function ServicesPage() {
                                 </div>
                                 <Link
                                     href={service.service_type === "home" ? "/dashboard/home-service" : "/dashboard"}
-                                    className="text-[10px] font-bold uppercase tracking-widest[0.1em] text-white hover:text-[#8DA6B8]"
+                                    className="text-[10px] font-bold uppercase tracking-widests[0.1em] text-white hover:text-[#8DA6B8]"
                                 >
                                     Book service ↗
                                 </Link>

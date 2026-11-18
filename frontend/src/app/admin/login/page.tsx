@@ -74,7 +74,7 @@ export default function AdminLoginPage() {
                 </form>
 
                 <div className="mt-7 border-t border-[#1e293b] pt-5 text-center">
-                    <Link href="/login" className="text-[10px] font-semibold uppercase tracking-[0.1em] text-gray-400 hover:text-white">
+                    <Link href="/login" className="text-[10px] font-semibold uppercase tracking-widest text-gray-400 hover:text-white">
                         Return to staff sign in
                     </Link>
                 </div>

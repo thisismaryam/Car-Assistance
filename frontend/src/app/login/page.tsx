@@ -41,7 +41,7 @@ export default function LoginPage() {
                         return;
                     }
                 }
-            } catch {}
+            } catch { }
             router.push("/admin");
         } catch (err: unknown) {
             setError(err instanceof Error ? err.message : "Unable to sign in. Please try again.");
@@ -91,7 +91,7 @@ export default function LoginPage() {
                     </button>
                 </form>
                 <div className="mt-7 border-t border-[#1e293b] pt-5 text-center">
-                    <Link href="/" className="text-[10px] font-semibold uppercase tracking-[0.1em] text-gray-400 hover:text-white">
+                    <Link href="/" className="text-[10px] font-semibold uppercase tracking-widest text-gray-400 hover:text-white">
                         ← Return to main site
                     </Link>
                 </div>
