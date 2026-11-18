@@ -1,16 +1,18 @@
 import uuid
 from datetime import datetime, date as py_date, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import cast, Date, func, text
 from sqlalchemy.orm import Session, joinedload
 from app.database import get_db
 from app.models.booking import Booking, BookingStatus, Service, ServiceType
 from app.models.vehicle import Vehicle
 from app.models.user import User, UserRole
-from app.schemas.booking import BookingCreate, BookingRead, StatusUpdate
+from app.core.limiter import limiter
+from app.schemas.booking import BookingCreate, BookingLookup, BookingRead, StatusUpdate
 from app.schemas.mechanic import AssignMechanicPayload
 from app.core.security import get_current_user, get_optional_current_user, require_admin, hash_password
 from app.utils.email import send_email
+from app.utils.google_calendar import create_booking_event, delete_booking_event
 from app.services.availability import (
     calculate_slot_availability,
     get_day_availability,
@@ -34,13 +36,17 @@ def check_availability(
     try:
         target_date = datetime.strptime(date, "%Y-%m-%d").date()
     except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+        raise HTTPException(
+            status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
 
-    service = db.query(Service).filter(Service.id == service_id, Service.is_active == True).first()
+    service = db.query(Service).filter(
+        Service.id == service_id, Service.is_active == True).first()
     if not service:
-        raise HTTPException(status_code=404, detail="Service not found or inactive")
+        raise HTTPException(
+            status_code=404, detail="Service not found or inactive")
 
-    slots = get_day_availability(db, service_id=service_id, target_date=target_date)
+    slots = get_day_availability(
+        db, service_id=service_id, target_date=target_date)
     return {
         "service_id": service.id,
         "service_name": service.name,
@@ -60,7 +66,8 @@ def create_booking(
     user = None
     if payload.customer_email and payload.customer_email.strip():
         email_clean = payload.customer_email.strip().lower()
-        user = db.query(User).filter(func.lower(User.email) == email_clean).first()
+        user = db.query(User).filter(
+            func.lower(User.email) == email_clean).first()
         if not user:
             random_pw = str(uuid.uuid4())
             user = User(
@@ -91,7 +98,8 @@ def create_booking(
     vehicle = None
     if payload.vehicle_registration and payload.vehicle_registration.strip():
         reg_clean = payload.vehicle_registration.strip().upper()
-        vehicle = db.query(Vehicle).filter(func.upper(Vehicle.registration) == reg_clean).first()
+        vehicle = db.query(Vehicle).filter(func.upper(
+            Vehicle.registration) == reg_clean).first()
         if not vehicle:
             vehicle = Vehicle(
                 owner_id=user.id,
@@ -108,11 +116,13 @@ def create_booking(
                 vehicle.owner_id = user.id
                 db.flush()
     elif payload.vehicle_id:
-        vehicle = db.query(Vehicle).filter(Vehicle.id == payload.vehicle_id).first()
+        vehicle = db.query(Vehicle).filter(
+            Vehicle.id == payload.vehicle_id).first()
         if not vehicle:
             raise HTTPException(status_code=404, detail="Vehicle not found")
         if current_user and vehicle.owner_id != current_user.id:
-            raise HTTPException(status_code=404, detail="Vehicle not found or does not belong to your account")
+            raise HTTPException(
+                status_code=404, detail="Vehicle not found or does not belong to your account")
     else:
         raise HTTPException(
             status_code=400,
@@ -123,19 +133,23 @@ def create_booking(
     service = db.query(Service).filter(
         Service.id == payload.service_id, Service.is_active == True).first()
     if not service:
-        raise HTTPException(status_code=404, detail="Service not found or inactive")
+        raise HTTPException(
+            status_code=404, detail="Service not found or inactive")
 
     if service.service_type == ServiceType.ROADSIDE:
-        raise HTTPException(status_code=400, detail="Roadside emergencies must be requested via the /emergency portal")
+        raise HTTPException(
+            status_code=400, detail="Roadside emergencies must be requested via the /emergency portal")
 
     if service.service_type == ServiceType.HOME and (not payload.address or not payload.address.strip()):
-        raise HTTPException(status_code=400, detail="Home address is required for home service bookings")
+        raise HTTPException(
+            status_code=400, detail="Home address is required for home service bookings")
 
     # 4. Concurrency Protection & Transaction Locking (FEATURE 1 & FEATURE 3)
     slot_iso = payload.scheduled_at.replace(microsecond=0).isoformat()
     lock_key = f"slot_{service.service_type.value}_{slot_iso}"
     try:
-        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": lock_key})
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {
+                   "k": lock_key})
     except Exception:
         pass
 
@@ -148,7 +162,8 @@ def create_booking(
         Booking.status != BookingStatus.CANCELLED
     ).first()
     if recent_dup:
-        raise HTTPException(status_code=400, detail="You already have an active booking for this vehicle, service, and time.")
+        raise HTTPException(
+            status_code=400, detail="You already have an active booking for this vehicle, service, and time.")
 
     # 6. Prevent conflicting bookings for the SAME vehicle and time (FEATURE 3)
     service_duration = service.duration_minutes or 60
@@ -166,7 +181,8 @@ def create_booking(
                 BookingStatus.IN_PROGRESS,
             ]),
             Booking.scheduled_at < slot_end,
-            func.timezone('UTC', Booking.scheduled_at) + (func.coalesce(Service.duration_minutes, 60) * text("interval '1 minute'")) > payload.scheduled_at
+            func.timezone('UTC', Booking.scheduled_at) + (func.coalesce(
+                Service.duration_minutes, 60) * text("interval '1 minute'")) > payload.scheduled_at
         )
         .first()
     )
@@ -181,7 +197,8 @@ def create_booking(
     same_svc_active = db.query(Booking).filter(
         Booking.vehicle_id == vehicle.id,
         Booking.service_id == payload.service_id,
-        Booking.status.in_([BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.ASSIGNED]),
+        Booking.status.in_(
+            [BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.ASSIGNED]),
         Booking.scheduled_at >= now_utc
     ).first()
     if same_svc_active:
@@ -213,7 +230,8 @@ def create_booking(
         now=now_utc
     )
     if not slot_info["is_available"]:
-        alternatives = find_alternative_slots(db, service=service, from_date=target_date)
+        alternatives = find_alternative_slots(
+            db, service=service, from_date=target_date)
         alt_str = f" Suggested alternative times: {', '.join(alternatives[:3])}." if alternatives else ""
         raise HTTPException(
             status_code=409,
@@ -242,6 +260,13 @@ def create_booking(
     db.add(booking)
     db.commit()
     db.refresh(booking)
+
+    # 10b. Google Calendar invitation (best-effort; never fails the booking)
+    event_id = create_booking_event(booking, user, service, vehicle)
+    if event_id:
+        booking.google_event_id = event_id
+        db.commit()
+        db.refresh(booking)
 
     # 11. Send Confirmation Email to the Customer
     try:
@@ -277,6 +302,58 @@ def create_booking(
         )
         .filter(Booking.id == booking.id)
         .first()
+    )
+
+
+def _remove_calendar_event(db: Session, booking: Booking) -> None:
+    """Delete the Google Calendar event (guest gets a cancellation) once a booking is cancelled."""
+    if booking.google_event_id and delete_booking_event(booking.google_event_id):
+        booking.google_event_id = None
+        db.commit()
+        db.refresh(booking)
+
+
+def _phone_key(phone: str | None) -> str:
+    """Digits only, last 10 — so '+92 300 1234567' matches '0300-1234567'."""
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    return digits[-10:]
+
+
+@router.post("/lookup", response_model=list[BookingRead])
+@limiter.limit("10/minute")
+def lookup_my_bookings(
+    request: Request,
+    payload: BookingLookup,
+    db: Session = Depends(get_db),
+):
+    """
+    Guest-friendly 'My bookings'. Returns every booking (all services, dates,
+    statuses incl. cancelled) for the customer whose email AND phone match.
+    Same generic error for any mismatch, so it can't be used to probe emails.
+    """
+    email_clean = payload.email.strip().lower()
+    user = db.query(User).filter(func.lower(User.email) == email_clean).first()
+
+    phone_key = _phone_key(payload.phone)
+    if (
+        not user
+        or len(phone_key) < 7
+        or _phone_key(user.phone) != phone_key
+    ):
+        raise HTTPException(
+            status_code=404, detail="No bookings found for these details.")
+
+    return (
+        db.query(Booking)
+        .options(
+            joinedload(Booking.customer),
+            joinedload(Booking.vehicle),
+            joinedload(Booking.service),
+            joinedload(Booking.mechanic)
+        )
+        .filter(Booking.customer_id == user.id)
+        .order_by(Booking.scheduled_at.desc())
+        .all()
     )
 
 
@@ -336,9 +413,9 @@ def get_booking_by_id(
 
     booking = query.first()
     if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found or not authorized")
+        raise HTTPException(
+            status_code=404, detail="Booking not found or not authorized")
     return booking
-
 
 
 @router.patch("/{booking_id}/assign", response_model=BookingRead)
@@ -372,7 +449,8 @@ def assign_mechanic_to_booking(
         User.is_active == True
     ).first()
     if not mechanic:
-        raise HTTPException(status_code=404, detail="Active mechanic not found")
+        raise HTTPException(
+            status_code=404, detail="Active mechanic not found")
 
     duration = booking.service.duration_minutes if booking.service else 60
     slot_start = booking.scheduled_at
@@ -435,6 +513,8 @@ def cancel_booking(
     db.commit()
     db.refresh(booking)
 
+    _remove_calendar_event(db, booking)
+
     return (
         db.query(Booking)
         .options(
@@ -463,6 +543,9 @@ def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(
     db.commit()
     db.refresh(booking)
 
+    if payload.status.lower() == "cancelled":
+        _remove_calendar_event(db, booking)
+
     # When booking status is updated to confirmed, notify the customer via email
     if payload.status.lower() == "confirmed":
         customer = booking.customer
@@ -472,7 +555,8 @@ def update_status(booking_id: int, payload: StatusUpdate, db: Session = Depends(
             subject = f"Your Car Assistance Booking #{booking.id} is Confirmed"
             service_name = service.name if service else "Service"
             vehicle_info = f"{vehicle.year} {vehicle.make} {vehicle.model} ({vehicle.registration})" if vehicle else "Vehicle"
-            sched_str = booking.scheduled_at.strftime('%Y-%m-%d %H:%M UTC') if hasattr(booking.scheduled_at, 'strftime') else str(booking.scheduled_at)
+            sched_str = booking.scheduled_at.strftime('%Y-%m-%d %H:%M UTC') if hasattr(
+                booking.scheduled_at, 'strftime') else str(booking.scheduled_at)
 
             body = (
                 f"Hello {customer.full_name},\n\n"

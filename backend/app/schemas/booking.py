@@ -10,6 +10,12 @@ from app.models.booking import BookingStatus, ServiceType
 # --- Service Schemas ---
 
 
+class BookingLookup(BaseModel):
+    """Guest lookup: both fields must match the customer record."""
+    email: str
+    phone: str
+
+
 class ServiceCreate(BaseModel):
     name: str
     description: str

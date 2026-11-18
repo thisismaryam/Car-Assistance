@@ -54,9 +54,12 @@ class Booking(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     status: Mapped[BookingStatus] = mapped_column(
         default=BookingStatus.PENDING, index=True)
-    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    scheduled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True)
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    google_event_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

@@ -133,6 +133,12 @@ export default function HomeServicePage() {
             if (!confirmed || typeof confirmed.id !== "number") {
                 throw new Error("Server error: database confirmation record was not returned.");
             }
+            try {
+                localStorage.setItem(
+                    "guest_contact",
+                    JSON.stringify({ email: payload.customer_email, phone: payload.customer_phone })
+                );
+            } catch { }
 
             setConfirmedBooking(confirmed);
             setMessage("");
@@ -375,11 +381,10 @@ export default function HomeServicePage() {
                                                 <div
                                                     key={s.id}
                                                     onClick={() => setSelectedService(s.id.toString())}
-                                                    className={`p-4 rounded-lg border cursor-pointer transition-all ${
-                                                        isSelected
+                                                    className={`p-4 rounded-lg border cursor-pointer transition-all ${isSelected
                                                             ? "border-[#2563EB] bg-[#2563EB]/15"
                                                             : "border-[#1e293b] bg-[#090D14] hover:bg-[#1e293b] hover:border-gray-600"
-                                                    }`}
+                                                        }`}
                                                 >
                                                     <div className="flex justify-between items-start">
                                                         <div>
@@ -493,11 +498,10 @@ export default function HomeServicePage() {
                                                         type="button"
                                                         key={idx}
                                                         onClick={() => setDate(s.start_time)}
-                                                        className={`p-2.5 rounded border text-center transition-all ${
-                                                            isSelected
+                                                        className={`p-2.5 rounded border text-center transition-all ${isSelected
                                                                 ? "border-[#2563EB] bg-[#2563EB]/20 text-white font-bold"
                                                                 : "border-[#1e293b] bg-[#151D2A] hover:bg-[#1e293b] text-gray-300"
-                                                        }`}
+                                                            }`}
                                                     >
                                                         <p className="text-xs font-mono font-medium">{startTimeStr} - {endTimeStr} UTC</p>
                                                     </button>
