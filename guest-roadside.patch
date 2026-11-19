@@ -1,0 +1,751 @@
+diff --git a/backend/alembic/versions/d6f9b2e3a1c8_guest_roadside_requests.py b/backend/alembic/versions/d6f9b2e3a1c8_guest_roadside_requests.py
+new file mode 100644
+index 0000000..a9f0fbb
+--- /dev/null
++++ b/backend/alembic/versions/d6f9b2e3a1c8_guest_roadside_requests.py
+@@ -0,0 +1,63 @@
++"""Allow guest roadside requests (nullable user_id + guest contact columns).
++
++Revision ID: d6f9b2e3a1c8
++Revises: c5e8a1d2f4b7
++Create Date: 2026-11-19
++
++Written defensively: each step checks the live schema first, so it is safe to
++run even if part of it was applied by hand.
++"""
++from typing import Sequence, Union
++
++from alembic import op
++import sqlalchemy as sa
++
++revision: str = 'd6f9b2e3a1c8'
++down_revision: Union[str, Sequence[str], None] = 'c5e8a1d2f4b7'
++branch_labels: Union[str, Sequence[str], None] = None
++depends_on: Union[str, Sequence[str], None] = None
++
++TABLE = "roadside_requests"
++
++
++def _columns() -> set[str]:
++    insp = sa.inspect(op.get_bind())
++    return {c["name"] for c in insp.get_columns(TABLE)}
++
++
++def upgrade() -> None:
++    cols = _columns()
++
++    # Guests have no account, so user_id must be optional.
++    op.alter_column(TABLE, "user_id", existing_type=sa.Integer(), nullable=True)
++
++    for name, length in (
++        ("guest_name", 150),
++        ("guest_phone", 30),
++        ("guest_email", 255),
++        ("guest_vehicle", 200),
++    ):
++        if name not in cols:
++            op.add_column(TABLE, sa.Column(name, sa.String(length=length), nullable=True))
++
++    if "tracking_token" not in cols:
++        op.add_column(TABLE, sa.Column("tracking_token", sa.String(length=64), nullable=True))
++        op.create_index(
++            op.f("ix_roadside_requests_tracking_token"),
++            TABLE,
++            ["tracking_token"],
++            unique=True,
++        )
++
++
++def downgrade() -> None:
++    cols = _columns()
++    if "tracking_token" in cols:
++        op.drop_index(op.f("ix_roadside_requests_tracking_token"), table_name=TABLE)
++        op.drop_column(TABLE, "tracking_token")
++    for name in ("guest_vehicle", "guest_email", "guest_phone", "guest_name"):
++        if name in cols:
++            op.drop_column(TABLE, name)
++    # Guest rows have no owner; remove them before restoring NOT NULL.
++    op.execute(f"DELETE FROM {TABLE} WHERE user_id IS NULL")
++    op.alter_column(TABLE, "user_id", existing_type=sa.Integer(), nullable=False)
+diff --git a/backend/app/api/endpoints/roadside.py b/backend/app/api/endpoints/roadside.py
+index 618c4fd..7010a8c 100644
+--- a/backend/app/api/endpoints/roadside.py
++++ b/backend/app/api/endpoints/roadside.py
+@@ -1,5 +1,7 @@
++import re
++import secrets
+ from datetime import datetime, timezone
+-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
++from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+ from sqlalchemy.orm import Session, joinedload
+ from app.database import get_db
+ from app.models.roadside import RoadsideRequest, RoadsideAssignment
+@@ -7,12 +9,14 @@ from app.models.vehicle import Vehicle
+ from app.models.user import User, UserRole
+ from app.schemas.roadside import (
+     RoadsideCreate,
++    RoadsideCreated,
+     RoadsideRead,
+     RoadsideStatusUpdate,
+     RoadsideAssignPayload,
+     RoadsideAssignmentRead,
+ )
+-from app.core.security import get_current_user, require_admin
++from app.core.security import get_current_user, get_optional_current_user, require_admin
++from app.core.limiter import limiter
+ from app.services.roadside_dispatch import dispatch_manager
+ 
+ router = APIRouter()
+@@ -29,6 +33,18 @@ ALLOWED_LIFECYCLE_STATUSES = [
+ ]
+ 
+ 
++def _token_matches(record: RoadsideRequest, token: str | None) -> bool:
++    """True when `token` is the guest tracking token of `record` (constant-time compare)."""
++    if not token or not record.tracking_token:
++        return False
++    return secrets.compare_digest(record.tracking_token, token)
++
++
++def _clean(value: str | None) -> str | None:
++    value = (value or "").strip()
++    return value or None
++
++
+ def _format_roadside_dict(r: RoadsideRequest) -> dict:
+     """Serializes a RoadsideRequest object to a dictionary for real-time WebSocket payloads."""
+     return {
+@@ -39,6 +55,10 @@ def _format_roadside_dict(r: RoadsideRequest) -> dict:
+         "issue_type": r.issue_type,
+         "status": r.status,
+         "notes": r.notes,
++        "guest_name": r.guest_name,
++        "guest_phone": r.guest_phone,
++        "guest_email": r.guest_email,
++        "guest_vehicle": r.guest_vehicle,
+         "assigned_mechanic_id": r.assigned_mechanic_id,
+         "assigned_mechanic": {
+             "id": r.assigned_mechanic.id,
+@@ -70,32 +90,72 @@ def _format_roadside_dict(r: RoadsideRequest) -> dict:
+     }
+ 
+ 
+-@router.post("/", response_model=RoadsideRead, status_code=201)
++@router.post("/", response_model=RoadsideCreated, status_code=201)
++@limiter.limit("10/minute")
+ async def create_roadside_request(
++    request: Request,
+     payload: RoadsideCreate,
+     db: Session = Depends(get_db),
+-    current_user: User = Depends(get_current_user)
++    current_user: User | None = Depends(get_optional_current_user)
+ ):
+     """
+     FEATURE 4: Emergency dispatch workflow capturing complete incident data:
+     issue type, vehicle, location, customer notes, and timestamps under unique request IDs.
+     Persists to PostgreSQL with immediate streaming to the dedicated admin queue.
++
++    Works for logged-in customers (as before) AND for guests: a person in an emergency
++    must not need an account. Guests send name + phone + vehicle text and receive a
++    private tracking_token used to follow / cancel their own request.
+     """
+-    if payload.vehicle_id:
+-        vehicle = db.query(Vehicle).filter(
+-            Vehicle.id == payload.vehicle_id,
+-            Vehicle.owner_id == current_user.id
+-        ).first()
+-        if not vehicle:
+-            raise HTTPException(status_code=404, detail="Vehicle not found or does not belong to your account")
++    location = payload.location.strip()
++    issue_type = payload.issue_type.strip()
++    if not location:
++        raise HTTPException(status_code=400, detail="Please provide your location")
++    if not issue_type:
++        raise HTTPException(status_code=400, detail="Please choose the type of emergency")
++
++    guest_fields: dict = {}
++    tracking_token = None
++    vehicle_id = None
++
++    if current_user is not None:
++        if payload.vehicle_id:
++            vehicle = db.query(Vehicle).filter(
++                Vehicle.id == payload.vehicle_id,
++                Vehicle.owner_id == current_user.id
++            ).first()
++            if not vehicle:
++                raise HTTPException(status_code=404, detail="Vehicle not found or does not belong to your account")
++            vehicle_id = vehicle.id
++        user_id = current_user.id
++    else:
++        name = _clean(payload.guest_name)
++        phone = _clean(payload.guest_phone)
++        vehicle_text = _clean(payload.guest_vehicle)
++        if not name or len(name) < 2:
++            raise HTTPException(status_code=400, detail="Please enter your name")
++        if not phone or len(re.sub(r"\D", "", phone)) < 7:
++            raise HTTPException(status_code=400, detail="Please enter a valid phone number so our team can call you")
++        if not vehicle_text:
++            raise HTTPException(status_code=400, detail="Please describe your vehicle (make, model, registration)")
++        user_id = None
++        tracking_token = secrets.token_urlsafe(32)
++        guest_fields = {
++            "guest_name": name[:150],
++            "guest_phone": phone[:30],
++            "guest_email": (_clean(payload.guest_email) or "")[:255] or None,
++            "guest_vehicle": vehicle_text[:200],
++            "tracking_token": tracking_token,
++        }
+ 
+     roadside = RoadsideRequest(
+-        user_id=current_user.id,
+-        vehicle_id=payload.vehicle_id,
+-        location=payload.location.strip(),
+-        issue_type=payload.issue_type.strip(),
++        user_id=user_id,
++        vehicle_id=vehicle_id,
++        location=location,
++        issue_type=issue_type,
+         notes=payload.notes.strip() if payload.notes else None,
+-        status="requested"
++        status="requested",
++        **guest_fields,
+     )
+     db.add(roadside)
+     db.commit()
+@@ -119,7 +179,10 @@ async def create_roadside_request(
+     except Exception:
+         pass
+ 
+-    return record
++    # The secret token is attached to the response only (never stored in broadcasts / lists).
++    result = RoadsideCreated.model_validate(record)
++    result.tracking_token = tracking_token
++    return result
+ 
+ 
+ @router.get("/my", response_model=list[RoadsideRead])
+@@ -162,8 +225,9 @@ def get_all_roadside_requests(
+ @router.get("/{request_id}", response_model=RoadsideRead)
+ def get_roadside_request(
+     request_id: int,
++    token: str | None = Query(default=None, description="Guest tracking token"),
+     db: Session = Depends(get_db),
+-    current_user: User = Depends(get_current_user)
++    current_user: User | None = Depends(get_optional_current_user)
+ ):
+     query = (
+         db.query(RoadsideRequest)
+@@ -175,12 +239,15 @@ def get_roadside_request(
+         )
+         .filter(RoadsideRequest.id == request_id)
+     )
+-    if current_user.role != UserRole.ADMIN:
+-        query = query.filter(RoadsideRequest.user_id == current_user.id)
+-
+     record = query.first()
+     if not record:
+         raise HTTPException(status_code=404, detail="Roadside request not found or unauthorized")
++
++    is_admin = current_user is not None and current_user.role == UserRole.ADMIN
++    is_owner = current_user is not None and record.user_id == current_user.id
++    if not (is_admin or is_owner or _token_matches(record, token)):
++        # Same message for "missing" and "forbidden" so IDs can't be probed.
++        raise HTTPException(status_code=404, detail="Roadside request not found or unauthorized")
+     return record
+ 
+ 
+@@ -263,8 +330,9 @@ async def assign_roadside_provider(
+ async def update_roadside_status(
+     request_id: int,
+     payload: RoadsideStatusUpdate,
++    token: str | None = Query(default=None, description="Guest tracking token"),
+     db: Session = Depends(get_db),
+-    current_user: User = Depends(get_current_user)
++    current_user: User | None = Depends(get_optional_current_user)
+ ):
+     """
+     FEATURE 4: Track lifecycle statuses (requested, accepted, assigned, en route, arrived, resolved, cancelled)
+@@ -292,8 +360,12 @@ async def update_roadside_status(
+             detail=f"Invalid lifecycle status '{payload.status}'. Allowed: requested, accepted, assigned, en route, arrived, resolved, cancelled"
+         )
+ 
+-    if current_user.role != UserRole.ADMIN:
+-        if roadside.user_id != current_user.id:
++    is_admin = current_user is not None and current_user.role == UserRole.ADMIN
++    if not is_admin:
++        is_owner = current_user is not None and roadside.user_id == current_user.id
++        if not (is_owner or _token_matches(roadside, token)):
++            if current_user is None:
++                raise HTTPException(status_code=401, detail="Authentication required")
+             raise HTTPException(status_code=403, detail="Not authorized to update this incident")
+         if requested_status != "cancelled":
+             raise HTTPException(status_code=403, detail="Customers can only cancel active requests")
+@@ -373,10 +445,20 @@ async def websocket_admin_endpoint(websocket: WebSocket):
+ 
+ 
+ @router.websocket("/ws/customer/{request_id}")
+-async def websocket_customer_endpoint(websocket: WebSocket, request_id: int):
++async def websocket_customer_endpoint(
++    websocket: WebSocket,
++    request_id: int,
++    token: str | None = Query(default=None),
++    db: Session = Depends(get_db),
++):
+     """
+     Customer real-time stream for live lifecycle updates (en route, arrived, resolved, etc.).
++    Guest requests (no account) require their private tracking token: ?token=...
+     """
++    record = db.query(RoadsideRequest).filter(RoadsideRequest.id == request_id).first()
++    if record is not None and record.user_id is None and not _token_matches(record, token):
++        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
++        return
+     await dispatch_manager.connect_customer(request_id, websocket)
+     try:
+         while True:
+diff --git a/backend/app/models/roadside.py b/backend/app/models/roadside.py
+index 559ffc7..55178fb 100644
+--- a/backend/app/models/roadside.py
++++ b/backend/app/models/roadside.py
+@@ -13,8 +13,9 @@ class RoadsideRequest(Base):
+     __tablename__ = "roadside_requests"
+ 
+     id: Mapped[int] = mapped_column(primary_key=True)
+-    user_id: Mapped[int] = mapped_column(
+-        ForeignKey("users.id", ondelete="CASCADE"), index=True
++    # NULL for guest (not logged in) emergency requests
++    user_id: Mapped[int | None] = mapped_column(
++        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+     )
+     vehicle_id: Mapped[int | None] = mapped_column(
+         ForeignKey("vehicles.id", ondelete="SET NULL"), nullable=True, index=True
+@@ -25,6 +26,14 @@ class RoadsideRequest(Base):
+     status: Mapped[str] = mapped_column(String(50), default="requested", index=True)
+     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+ 
++    # Guest contact details (only filled when user_id is NULL)
++    guest_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
++    guest_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
++    guest_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
++    guest_vehicle: Mapped[str | None] = mapped_column(String(200), nullable=True)
++    # Secret handed to the guest so only they can track / cancel their request
++    tracking_token: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
++
+     # Provider / Mechanic assignment
+     assigned_mechanic_id: Mapped[int | None] = mapped_column(
+         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+@@ -45,7 +54,7 @@ class RoadsideRequest(Base):
+         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+     )
+ 
+-    user: Mapped["User"] = relationship("User", foreign_keys=[user_id], back_populates="roadside_requests")
++    user: Mapped["User | None"] = relationship("User", foreign_keys=[user_id], back_populates="roadside_requests")
+     vehicle: Mapped["Vehicle | None"] = relationship(back_populates="roadside_requests")
+     assigned_mechanic: Mapped["User | None"] = relationship("User", foreign_keys=[assigned_mechanic_id], back_populates="assigned_roadside_requests")
+     assignments: Mapped[list["RoadsideAssignment"]] = relationship(
+diff --git a/backend/app/schemas/roadside.py b/backend/app/schemas/roadside.py
+index 5bd5f9e..dbfa69c 100644
+--- a/backend/app/schemas/roadside.py
++++ b/backend/app/schemas/roadside.py
+@@ -9,6 +9,11 @@ class RoadsideCreate(BaseModel):
+     location: str
+     issue_type: str
+     notes: str | None = None
++    # Guest (not logged in) contact details. Required when no valid login is sent.
++    guest_name: str | None = None
++    guest_phone: str | None = None
++    guest_email: str | None = None
++    guest_vehicle: str | None = None
+ 
+ 
+ class RoadsideAssignPayload(BaseModel):
+@@ -41,13 +46,18 @@ class RoadsideRead(BaseModel):
+     model_config = ConfigDict(from_attributes=True)
+ 
+     id: int
+-    user_id: int
++    user_id: int | None = None
+     vehicle_id: int | None
+     location: str
+     issue_type: str
+     status: str
+     notes: str | None
+ 
++    guest_name: str | None = None
++    guest_phone: str | None = None
++    guest_email: str | None = None
++    guest_vehicle: str | None = None
++
+     assigned_mechanic_id: int | None = None
+     accepted_at: datetime | None = None
+     assigned_at: datetime | None = None
+@@ -59,7 +69,14 @@ class RoadsideRead(BaseModel):
+     created_at: datetime
+     updated_at: datetime
+ 
+-    user: UserRead
++    user: UserRead | None = None
+     vehicle: VehicleRead | None = None
+     assigned_mechanic: UserRead | None = None
+     assignments: list[RoadsideAssignmentRead] = []
++
++
++class RoadsideCreated(RoadsideRead):
++    """Response of POST /roadside/. The tracking token is only ever returned here,
++    once, to the person who created the request (guests need it to track/cancel)."""
++
++    tracking_token: str | None = None
+diff --git a/frontend/src/app/admin/roadside/page.tsx b/frontend/src/app/admin/roadside/page.tsx
+index de41c10..f851cf4 100644
+--- a/frontend/src/app/admin/roadside/page.tsx
++++ b/frontend/src/app/admin/roadside/page.tsx
+@@ -306,11 +306,16 @@ export default function AdminRoadsidePage() {
+                                             </td>
+ 
+                                             <td className="px-5 py-3.5">
+-                                                <p className="font-bold text-white">{r.user?.full_name || `User ${r.user_id}`}</p>
++                                                <p className="font-bold text-white">
++                                                    {r.user?.full_name || r.guest_name || `User ${r.user_id}`}
++                                                    {!r.user && r.guest_name && (
++                                                        <span className="ml-2 text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">Guest</span>
++                                                    )}
++                                                </p>
+                                                 <p className="text-[11px] text-gray-300 font-mono mt-0.5">
+-                                                    {r.user?.phone ? (
+-                                                        <a href={`tel:${r.user.phone}`} className="hover:text-[#2563EB] transition-colors">
+-                                                            📞 {r.user.phone}
++                                                    {(r.user?.phone || r.guest_phone) ? (
++                                                        <a href={`tel:${r.user?.phone || r.guest_phone}`} className="hover:text-[#2563EB] transition-colors">
++                                                            📞 {r.user?.phone || r.guest_phone}
+                                                         </a>
+                                                     ) : "—"}
+                                                 </p>
+@@ -322,6 +327,8 @@ export default function AdminRoadsidePage() {
+                                                         <p className="text-white font-medium">{r.vehicle.year} {r.vehicle.make} {r.vehicle.model}</p>
+                                                         <p className="text-[11px] text-gray-400 font-mono">{r.vehicle.registration}</p>
+                                                     </div>
++                                                ) : r.guest_vehicle ? (
++                                                    <p className="text-white font-medium">{r.guest_vehicle}</p>
+                                                 ) : (
+                                                     <span className="text-gray-400 italic">Unregistered / Rental</span>
+                                                 )}
+diff --git a/frontend/src/app/emergency/page.tsx b/frontend/src/app/emergency/page.tsx
+index cba7ab9..0c8dd77 100644
+--- a/frontend/src/app/emergency/page.tsx
++++ b/frontend/src/app/emergency/page.tsx
+@@ -23,6 +23,26 @@ const LIFECYCLE_STAGES = [
+     { key: "resolved", label: "6. Resolved" },
+ ];
+ 
++const API = "http://localhost:8000";
++const GUEST_KEY = "guest_roadside";
++
++// A guest has no account; we remember { id, token } of their request in this browser
++// so the live tracker survives a page refresh.
++function readGuestSession(): { id: number; token: string } | null {
++    try {
++        const raw = localStorage.getItem(GUEST_KEY);
++        if (!raw) return null;
++        const parsed = JSON.parse(raw);
++        return parsed?.id && parsed?.token ? parsed : null;
++    } catch {
++        return null;
++    }
++}
++
++function clearGuestSession() {
++    try { localStorage.removeItem(GUEST_KEY); } catch { /* ignore */ }
++}
++
+ export default function EmergencyPage() {
+     const router = useRouter();
+     const [user, setUser] = useState<any>(null);
+@@ -37,17 +57,44 @@ export default function EmergencyPage() {
+     const [errorMsg, setErrorMsg] = useState<string>("");
+     const [wsConnected, setWsConnected] = useState<boolean>(false);
+     const [cancelling, setCancelling] = useState(false);
++    // Guest (not logged in) details
++    const [guestName, setGuestName] = useState<string>("");
++    const [guestPhone, setGuestPhone] = useState<string>("");
++    const [guestEmail, setGuestEmail] = useState<string>("");
++    const [guestVehicle, setGuestVehicle] = useState<string>("");
++    const [guestToken, setGuestToken] = useState<string | null>(null);
+ 
+     const wsRef = useRef<WebSocket | null>(null);
+ 
+     // Fetch active user and vehicles, and check for any existing active roadside incident
+     useEffect(() => {
+         const token = localStorage.getItem("token");
+-        if (!token) return;
++        if (!token) {
++            // Guest: resume tracking of their own request, if they have one in this browser
++            const guest = readGuestSession();
++            if (guest) {
++                fetch(`${API}/roadside/${guest.id}?token=${encodeURIComponent(guest.token)}`)
++                    .then(r => r.ok ? r.json() : null)
++                    .then(data => {
++                        if (data && !["resolved", "cancelled"].includes((data.status || "").toLowerCase())) {
++                            setGuestToken(guest.token);
++                            setActiveIncident(data);
++                        } else {
++                            clearGuestSession();
++                        }
++                    })
++                    .catch(() => {});
++            }
++            return;
++        }
+ 
+         const headers = { Authorization: `Bearer ${token}` };
+         Promise.all([
+-            fetch("http://localhost:8000/auth/me", { headers }).then(r => r.ok ? r.json() : null),
++            fetch("http://localhost:8000/auth/me", { headers }).then(r => {
++                // Stale / expired login: drop it so the person can continue as a guest.
++                if (r.status === 401) localStorage.removeItem("token");
++                return r.ok ? r.json() : null;
++            }),
+             fetch("http://localhost:8000/vehicles/my-vehicles", { headers }).then(r => r.ok ? r.json() : []),
+             fetch("http://localhost:8000/roadside/my", { headers }).then(r => r.ok ? r.json() : []),
+         ]).then(([userData, vehicleData, roadsideData]) => {
+@@ -77,7 +124,10 @@ export default function EmergencyPage() {
+ 
+         const connectCustomerWS = () => {
+             try {
+-                socket = new WebSocket(`ws://localhost:8000/roadside/ws/customer/${incidentId}`);
++                socket = new WebSocket(
++                    `ws://localhost:8000/roadside/ws/customer/${incidentId}` +
++                    (guestToken ? `?token=${encodeURIComponent(guestToken)}` : "")
++                );
+                 wsRef.current = socket;
+ 
+                 socket.onopen = () => {
+@@ -114,9 +164,12 @@ export default function EmergencyPage() {
+         // 5-second polling fallback
+         const pollInterval = setInterval(() => {
+             const token = localStorage.getItem("token");
+-            if (!token) return;
+-            fetch(`http://localhost:8000/roadside/${incidentId}`, {
+-                headers: { Authorization: `Bearer ${token}` }
++            if (!token && !guestToken) return;
++            const url = guestToken
++                ? `${API}/roadside/${incidentId}?token=${encodeURIComponent(guestToken)}`
++                : `${API}/roadside/${incidentId}`;
++            fetch(url, {
++                headers: !guestToken && token ? { Authorization: `Bearer ${token}` } : {}
+             })
+                 .then(res => res.ok ? res.json() : null)
+                 .then(data => {
+@@ -130,7 +183,7 @@ export default function EmergencyPage() {
+             if (reconnectTimer) clearTimeout(reconnectTimer);
+             if (socket) socket.close();
+         };
+-    }, [activeIncident?.id]);
++    }, [activeIncident?.id, guestToken]);
+ 
+     const handleGetLocation = () => {
+         if (!navigator.geolocation) {
+@@ -166,26 +219,47 @@ export default function EmergencyPage() {
+             return;
+         }
+ 
++        // Logged in -> send the token. Otherwise submit as a guest (no account needed).
+         const token = localStorage.getItem("token");
+-        if (!token) {
+-            setErrorMsg("Please log in to submit a dispatch request, or call our 24/7 hotline directly.");
+-            return;
++        const asGuest = !token;
++
++        if (asGuest) {
++            if (guestName.trim().length < 2) {
++                setErrorMsg("Please enter your name.");
++                return;
++            }
++            if (guestPhone.replace(/\D/g, "").length < 7) {
++                setErrorMsg("Please enter a valid phone number so our team can call you.");
++                return;
++            }
++            if (!guestVehicle.trim()) {
++                setErrorMsg("Please describe your vehicle (make, model, registration).");
++                return;
++            }
+         }
+ 
+         setSubmitting(true);
+ 
+         try {
+-            const res = await fetch("http://localhost:8000/roadside/", {
++            const res = await fetch(`${API}/roadside/`, {
+                 method: "POST",
+                 headers: {
+                     "Content-Type": "application/json",
+-                    Authorization: `Bearer ${token}`
++                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                 },
+                 body: JSON.stringify({
+-                    vehicle_id: selectedVehicle ? parseInt(selectedVehicle) : null,
++                    vehicle_id: !asGuest && selectedVehicle ? parseInt(selectedVehicle) : null,
+                     location: location.trim(),
+                     issue_type: issueType,
+                     notes: notes.trim() || null,
++                    ...(asGuest
++                        ? {
++                              guest_name: guestName.trim(),
++                              guest_phone: guestPhone.trim(),
++                              guest_email: guestEmail.trim() || null,
++                              guest_vehicle: guestVehicle.trim(),
++                          }
++                        : {}),
+                 })
+             });
+ 
+@@ -195,6 +269,15 @@ export default function EmergencyPage() {
+             }
+ 
+             const data = await res.json();
++            if (data.tracking_token) {
++                // Guest request: keep the private token so this browser can track / cancel it
++                try {
++                    localStorage.setItem(GUEST_KEY, JSON.stringify({ id: data.id, token: data.tracking_token }));
++                } catch { /* private mode: tracking still works until refresh */ }
++                setGuestToken(data.tracking_token);
++            } else {
++                setGuestToken(null);
++            }
+             setActiveIncident(data);
+         } catch (err: any) {
+             setErrorMsg(err.message || "An error occurred submitting request.");
+@@ -210,17 +293,22 @@ export default function EmergencyPage() {
+         setCancelling(true);
+ 
+         try {
+-            const res = await fetch(`http://localhost:8000/roadside/${activeIncident.id}/status`, {
++            const res = await fetch(
++                `${API}/roadside/${activeIncident.id}/status` +
++                    (guestToken ? `?token=${encodeURIComponent(guestToken)}` : ""),
++                {
+                 method: "PATCH",
+                 headers: {
+                     "Content-Type": "application/json",
+-                    Authorization: `Bearer ${token}`
++                    ...(!guestToken && token ? { Authorization: `Bearer ${token}` } : {}),
+                 },
+                 body: JSON.stringify({ status: "cancelled", notes: "Cancelled by customer" }),
+-            });
++                }
++            );
+             if (res.ok) {
+                 const updated = await res.json();
+                 setActiveIncident(updated);
++                if (guestToken) clearGuestSession();
+             }
+         } finally {
+             setCancelling(false);
+@@ -348,6 +436,12 @@ export default function EmergencyPage() {
+                             <span className="text-gray-400">Live GPS Coordinates</span>
+                             <span className="text-white font-mono text-right max-w-xs truncate">{activeIncident.location}</span>
+                         </div>
++                        {!activeIncident.vehicle && activeIncident.guest_vehicle && (
++                            <div className="flex justify-between py-1">
++                                <span className="text-gray-400">Vehicle</span>
++                                <span className="text-white">{activeIncident.guest_vehicle}</span>
++                            </div>
++                        )}
+                         {activeIncident.vehicle && (
+                             <div className="flex justify-between py-1">
+                                 <span className="text-gray-400">Vehicle</span>
+@@ -374,7 +468,7 @@ export default function EmergencyPage() {
+                             </button>
+                         )}
+                         <button
+-                            onClick={() => { setActiveIncident(null); setLocation(""); setNotes(""); }}
++                            onClick={() => { setActiveIncident(null); setLocation(""); setNotes(""); setGuestToken(null); clearGuestSession(); }}
+                             className="bg-[#2563EB] hover:bg-blue-700 text-white text-xs font-bold py-2.5 px-4 rounded-lg transition-colors flex-1"
+                         >
+                             Log New Emergency Alert
+@@ -399,7 +493,7 @@ export default function EmergencyPage() {
+ 
+                     {!user && (
+                         <div className="p-3.5 mb-6 rounded-md bg-[#090D14] border border-[#1e293b] text-xs flex justify-between items-center">
+-                            <span className="text-gray-300">Have an account? Log in to automatically attach your vehicle & details.</span>
++                            <span className="text-gray-300">Have an account? Log in to attach your vehicle & details. No account? Just fill in the form below.</span>
+                             <Link href="/login" className="bg-[#2563EB] hover:bg-blue-700 text-white font-bold px-3 py-1.5 rounded transition-colors">
+                                 Log In
+                             </Link>
+@@ -410,7 +504,8 @@ export default function EmergencyPage() {
+                         {/* 1. SELECT VEHICLE */}
+                         <div>
+                             <label className="block text-xs font-medium text-gray-300 mb-1.5">
+-                                Select Vehicle
++                                {user || vehicles.length > 0 ? "Select Vehicle" : "Your Vehicle"}
++                                {!user && vehicles.length === 0 && <span className="text-red-400"> *</span>}
+                             </label>
+                             {vehicles.length > 0 ? (
+                                 <select
+@@ -425,12 +520,64 @@ export default function EmergencyPage() {
+                                     ))}
+                                 </select>
+                             ) : (
+-                                <p className="text-xs text-gray-400 p-2.5 bg-[#090D14] rounded-lg border border-[#1e293b]">
+-                                    {user ? "No registered vehicles found in your garage (will submit as unregistered)." : "Log in to link your registered garage vehicle."}
+-                                </p>
++                                user ? (
++                                    <p className="text-xs text-gray-400 p-2.5 bg-[#090D14] rounded-lg border border-[#1e293b]">
++                                        No registered vehicles found in your garage (will submit as unregistered).
++                                    </p>
++                                ) : (
++                                    <input
++                                        type="text"
++                                        placeholder="e.g. Toyota Corolla 2018, LEA-1234"
++                                        value={guestVehicle}
++                                        onChange={(e) => setGuestVehicle(e.target.value)}
++                                        className="w-full bg-[#090D14] border border-[#1e293b] text-white p-2.5 rounded-lg text-xs outline-none focus:border-[#2563EB]"
++                                    />
++                                )
+                             )}
+                         </div>
+ 
++                        {/* 1b. GUEST CONTACT DETAILS (only when not logged in) */}
++                        {!user && (
++                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
++                                <div>
++                                    <label className="block text-xs font-medium text-gray-300 mb-1.5">
++                                        Your Name <span className="text-red-400">*</span>
++                                    </label>
++                                    <input
++                                        type="text"
++                                        placeholder="Full name"
++                                        value={guestName}
++                                        onChange={(e) => setGuestName(e.target.value)}
++                                        className="w-full bg-[#090D14] border border-[#1e293b] text-white p-2.5 rounded-lg text-xs outline-none focus:border-[#2563EB]"
++                                    />
++                                </div>
++                                <div>
++                                    <label className="block text-xs font-medium text-gray-300 mb-1.5">
++                                        Phone Number <span className="text-red-400">*</span>
++                                    </label>
++                                    <input
++                                        type="tel"
++                                        placeholder="+92 300 0000000"
++                                        value={guestPhone}
++                                        onChange={(e) => setGuestPhone(e.target.value)}
++                                        className="w-full bg-[#090D14] border border-[#1e293b] text-white p-2.5 rounded-lg text-xs outline-none focus:border-[#2563EB]"
++                                    />
++                                </div>
++                                <div className="sm:col-span-2">
++                                    <label className="block text-xs font-medium text-gray-300 mb-1.5">
++                                        Email (Optional)
++                                    </label>
++                                    <input
++                                        type="email"
++                                        placeholder="you@example.com"
++                                        value={guestEmail}
++                                        onChange={(e) => setGuestEmail(e.target.value)}
++                                        className="w-full bg-[#090D14] border border-[#1e293b] text-white p-2.5 rounded-lg text-xs outline-none focus:border-[#2563EB]"
++                                    />
++                                </div>
++                            </div>
++                        )}
++
+                         {/* 2. SELECT EMERGENCY ISSUE */}
+                         <div>
+                             <label className="block text-xs font-medium text-gray-300 mb-2">

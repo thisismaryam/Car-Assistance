@@ -1,4 +1,3 @@
-import uuid
 from datetime import datetime, date as py_date, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import cast, Date, func, text
@@ -10,7 +9,8 @@ from app.models.user import User, UserRole
 from app.core.limiter import limiter
 from app.schemas.booking import BookingCreate, BookingLookup, BookingRead, StatusUpdate
 from app.schemas.mechanic import AssignMechanicPayload
-from app.core.security import get_current_user, get_optional_current_user, require_admin, hash_password
+from app.core.security import get_current_user, get_optional_current_user, require_admin
+from app.services.booking_customer import resolve_booking_customer
 from app.utils.email import send_email
 from app.utils.admin_notify import notify_admin
 from app.utils.google_calendar import create_booking_event, delete_booking_event
@@ -63,38 +63,9 @@ def create_booking(
     db: Session = Depends(get_db),
     current_user: User | None = Depends(get_optional_current_user),
 ):
-    # 1. Resolve or create user (Guest Booking Support)
-    user = None
-    if current_user:
-        # A logged-in user always books for themselves, whatever email is typed in the form.
-        user = current_user
-    elif payload.customer_email and payload.customer_email.strip():
-        email_clean = payload.customer_email.strip().lower()
-        user = db.query(User).filter(
-            func.lower(User.email) == email_clean).first()
-        if not user:
-            random_pw = str(uuid.uuid4())
-            user = User(
-                full_name=(payload.customer_name or "Guest Customer").strip(),
-                email=email_clean,
-                phone=(payload.customer_phone or "").strip(),
-                hashed_password=hash_password(random_pw),
-                role=UserRole.CUSTOMER,
-                is_active=True,
-            )
-            db.add(user)
-            db.flush()
-        else:
-            if payload.customer_name and (not user.full_name or user.full_name == "Guest Customer"):
-                user.full_name = payload.customer_name.strip()
-            if payload.customer_phone and not user.phone:
-                user.phone = payload.customer_phone.strip()
-            db.flush()
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="Guest details required: customer_name, customer_email, customer_phone."
-        )
+    # Staff tokens may exist in the shared browser storage; guest forms identify
+    # their customer from the submitted email rather than the staff identity.
+    user = resolve_booking_customer(db, payload, current_user)
 
     # 2. Resolve or create vehicle
     vehicle = None
@@ -122,7 +93,7 @@ def create_booking(
             Vehicle.id == payload.vehicle_id).first()
         if not vehicle:
             raise HTTPException(status_code=404, detail="Vehicle not found")
-        if current_user and vehicle.owner_id != current_user.id:
+        if vehicle.owner_id != user.id:
             raise HTTPException(
                 status_code=404, detail="Vehicle not found or does not belong to your account")
     else:
@@ -292,7 +263,7 @@ def create_booking(
     # 11. Confirmation email, sent AFTER the calendar step so it can say whether the
     #     event was added. Sent even if the calendar failed.
     try:
-        recipient_email = user.email or payload.customer_email
+        recipient_email = user.email
         if recipient_email:
             sched_str = booking.scheduled_at.strftime('%Y-%m-%d %H:%M UTC')
             state = "confirmed" if initial_status == BookingStatus.ASSIGNED else "received"

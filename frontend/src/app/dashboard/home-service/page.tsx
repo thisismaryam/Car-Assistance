@@ -125,11 +125,7 @@ export default function HomeServicePage() {
         setMessage("");
         setSubmitting(true);
 
-        const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
         const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (token) {
-            headers["Authorization"] = `Bearer ${token}`;
-        }
 
         try {
             const payload = {

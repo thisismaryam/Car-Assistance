@@ -47,7 +47,18 @@ Operational Rules:
 BOOKING_TRIGGER_WORDS = [
     "book", "reserve", "schedule", "appointment", "fix my car", "set up a visit", "confirm booking", "yes, please book"
 ]
-CONFIRMATION_WORDS = ["confirm", "yes", "proceed", "go ahead", "do it", "sure", "confirmed", "confirm booking"]
+BOOKING_REJECTION_RESPONSES = {
+    "no", "no thanks", "no thank you", "cancel", "cancel it", "cancel this",
+    "cancel booking", "cancel the booking", "stop", "not now", "do not proceed",
+    "dont proceed", "no cancel",
+}
+BOOKING_CONFIRMATION_RESPONSES = {
+    "yes", "yes please", "yes please confirm", "yes confirm", "confirm",
+    "yes please book it", "confirm booking", "i confirm", "confirmed",
+    "proceed", "go ahead", "do it", "sure",
+}
+BOOKING_PROPOSAL_MARKER = "would you like me to confirm and execute this booking now"
+BOOKING_DETAILS_MARKER = "to continue this booking, please provide"
 PRICING_TRIGGER_WORDS = ["price", "cost", "how much", "rate", "fee", "rates", "pricing", "services list", "what services"]
 # "Tell me about the appointment I made" is a LOOKUP of an existing booking, not a new booking.
 CREATE_BOOKING_VERB = re.compile(r"\b(book|reserve|schedule)\b", re.I)
@@ -139,12 +150,29 @@ class AIAssistantOrchestrator:
     def classify_intent(self, message: str, history: list[dict[str, str]]) -> str:
         msg = message.lower().strip()
 
-        # Check if user is answering a confirmation prompt from recent assistant history
         if history:
             last_assistant_msg = next((m.get("content", "") for m in reversed(history) if m.get("role") == "assistant"), "")
-            if "would you like me to confirm and execute this booking now" in last_assistant_msg.lower():
-                if any(w in msg for w in CONFIRMATION_WORDS) or msg in ["yes", "y", "confirm"]:
+            normalized_msg = re.sub(r"[^\w\s]", " ", msg)
+            normalized_msg = " ".join(normalized_msg.split())
+            last_assistant_lower = last_assistant_msg.lower()
+            has_booking_prompt = (
+                BOOKING_PROPOSAL_MARKER in last_assistant_lower
+                or BOOKING_DETAILS_MARKER in last_assistant_lower
+            )
+            if has_booking_prompt:
+                is_rejection = normalized_msg in BOOKING_REJECTION_RESPONSES or bool(
+                    re.fullmatch(
+                        r"(?:no|cancel)(?:\b.*)?",
+                        normalized_msg,
+                    )
+                )
+                if is_rejection:
+                    return "BOOKING_REJECTION"
+            if BOOKING_PROPOSAL_MARKER in last_assistant_lower:
+                if normalized_msg in BOOKING_CONFIRMATION_RESPONSES:
                     return "BOOKING_CONFIRMATION"
+            if BOOKING_DETAILS_MARKER in last_assistant_lower:
+                return "BOOKING_FLOW"
 
         # Follow-up to "please share your email and phone": the reply carries the email
         if history:
@@ -340,6 +368,14 @@ class AIAssistantOrchestrator:
     ) -> dict[str, Any]:
         intent = self.classify_intent(message, history)
 
+        if intent == "BOOKING_REJECTION":
+            return {
+                "branch": "conversational_booking",
+                "reply": "Understood. I cleared the booking draft; no booking was made.",
+                "booking_id": None,
+                "booking_link": None,
+            }
+
         if intent == "BOOKING_LOOKUP":
             return self._handle_booking_lookup(db, message, history, current_user)
 
@@ -377,47 +413,127 @@ class AIAssistantOrchestrator:
                     "booking_link": None,
                 }
 
-            # Extract service candidate
-            matched_service = None
-            msg_lower = message.lower()
             all_services = get_live_services_tool(db)
-            for s in all_services:
-                if s["name"].lower() in msg_lower or any(word in msg_lower for word in s["name"].lower().split()):
-                    matched_service = s
-                    break
+            user_messages = [m.get("content", "") for m in history if m.get("role") == "user"] + [message]
+            latest_booking_request = max(
+                (i for i, text in enumerate(user_messages)
+                 if any(word in text.lower() for word in BOOKING_TRIGGER_WORDS)),
+                default=0,
+            )
+            booking_messages = user_messages[latest_booking_request:]
 
-            if not matched_service:
-                matched_service = next((s for s in all_services if s["category"] == "workshop"), all_services[0])
+            matched_services = []
+            selected_vehicle = None
+            ambiguous_vehicles = False
+            requested_date = None
+            requested_time = None
+            address = None
+            for user_text in booking_messages:
+                text_lower = user_text.lower()
+                exact_service_matches = [
+                    service for service in all_services
+                    if service["name"].lower() in text_lower
+                ]
+                service_matches = exact_service_matches or [
+                    service for service in all_services
+                    if any(
+                        token in text_lower
+                        for token in service["name"].lower().split()
+                        if len(token) > 3 and token not in {"change", "service", "replacement", "assistance"}
+                    )
+                ]
+                if service_matches:
+                    matched_services = service_matches
 
-            selected_v = user_vehicles[0]
-            for v in user_vehicles:
-                if v.make.lower() in msg_lower or v.model.lower() in msg_lower or v.registration.lower() in msg_lower:
-                    selected_v = v
-                    break
+                vehicle_matches = [
+                    vehicle for vehicle in user_vehicles
+                    if vehicle.registration.lower() in text_lower
+                    or (
+                        vehicle.make.lower() in text_lower
+                        and vehicle.model.lower() in text_lower
+                    )
+                    or (
+                        vehicle.model.lower() in text_lower
+                        and sum(v.model.lower() == vehicle.model.lower() for v in user_vehicles) == 1
+                    )
+                ]
+                if vehicle_matches:
+                    ambiguous_vehicles = len(vehicle_matches) > 1
+                    selected_vehicle = vehicle_matches[0] if not ambiguous_vehicles else None
 
-            is_confirmation = (intent == "BOOKING_CONFIRMATION") or ("confirm" in msg_lower and ("book" in msg_lower or "yes" in msg_lower))
+                date_match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", user_text)
+                if date_match:
+                    try:
+                        requested_date = datetime.strptime(date_match.group(0), "%Y-%m-%d").date()
+                    except ValueError:
+                        requested_date = None
+                elif re.search(r"\btoday\b", text_lower):
+                    requested_date = datetime.now(timezone.utc).date()
+                elif re.search(r"\btomorrow\b", text_lower):
+                    requested_date = datetime.now(timezone.utc).date() + timedelta(days=1)
 
-            now_utc = datetime.now(timezone.utc)
-            slot_candidate = (now_utc + timedelta(hours=3)).replace(minute=0, second=0, microsecond=0)
-            if slot_candidate.hour >= 17:
-                slot_candidate = (slot_candidate + timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
-            if slot_candidate.weekday() == 6:  # Sunday closed
-                slot_candidate = slot_candidate + timedelta(days=1)
+                time_match = re.search(
+                    r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b"
+                    r"|\b(\d{1,2}):(\d{2})\s*(am|pm)?\b",
+                    text_lower,
+                )
+                if time_match:
+                    hour = int(time_match.group(1) or time_match.group(4))
+                    minute = int(time_match.group(2) or time_match.group(5) or 0)
+                    meridiem = time_match.group(3) or time_match.group(6)
+                    if meridiem:
+                        hour = hour % 12 + (12 if meridiem == "pm" else 0)
+                    if 0 <= hour <= 23 and 0 <= minute <= 59:
+                        requested_time = (hour, minute)
 
-            date_match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", message)
-            if date_match:
-                try:
-                    p_date = datetime.strptime(date_match.group(0), "%Y-%m-%d").date()
-                    slot_candidate = datetime.combine(p_date, datetime.min.time()).replace(hour=10, tzinfo=timezone.utc)
-                except Exception:
-                    pass
+                address_match = re.search(r"(?:address|location)\s*(?:is|:)\s*(.+)", user_text, re.I)
+                if address_match:
+                    address = address_match.group(1).strip()
 
-            address = "Customer Registered Driveway" if matched_service["category"] == "home" else None
+            matched_service = matched_services[0] if len(matched_services) == 1 else None
+            slot_candidate = None
+            if requested_date is not None and requested_time is not None:
+                slot_candidate = datetime(
+                    requested_date.year, requested_date.month, requested_date.day,
+                    requested_time[0], requested_time[1], tzinfo=timezone.utc,
+                )
+
+            missing = []
+            if ambiguous_vehicles:
+                missing.append("Please name just one vehicle from your garage.")
+            elif selected_vehicle is None:
+                vehicle_list = ", ".join(
+                    f"{v.year} {v.make} {v.model} ({v.registration})" for v in user_vehicles
+                )
+                missing.append(f"Which vehicle would you like to book for? Your vehicles: {vehicle_list}.")
+            if len(matched_services) > 1:
+                choices = ", ".join(s["name"] for s in matched_services)
+                missing.append(f"Which service would you like? Please choose one: {choices}.")
+            elif matched_service is None:
+                choices = ", ".join(s["name"] for s in all_services)
+                missing.append(f"Which service would you like to book? Available services: {choices}.")
+            if requested_date is None and requested_time is None:
+                missing.append("What date and time would you prefer?")
+            elif requested_date is None:
+                missing.append("What date would you prefer?")
+            elif requested_time is None:
+                missing.append("What time would you prefer?")
+            if matched_service and matched_service["category"] == "home" and not address:
+                missing.append("Please provide the service address (for example, 'Address: 123 Main Street').")
+            if missing:
+                return {
+                    "branch": "conversational_booking",
+                    "reply": "To continue this booking, please provide:\n" + "\n".join(f"• {item}" for item in missing),
+                    "booking_id": None,
+                    "booking_link": None,
+                }
+
+            is_confirmation = intent == "BOOKING_CONFIRMATION"
 
             val_result = validate_booking_intent_tool(
                 db=db,
                 current_user=current_user,
-                vehicle_query=selected_v.id,
+                vehicle_query=selected_vehicle.id,
                 service_query=matched_service["id"],
                 scheduled_at=slot_candidate,
                 address=address,

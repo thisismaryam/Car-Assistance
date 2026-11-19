@@ -141,27 +141,28 @@ def validate_booking_intent_tool(
     matched_vehicle = None
     if vehicle_query is not None:
         v_str = str(vehicle_query).strip().lower()
-        for v in user_vehicles:
+        exact_vehicle_matches = [
+            v for v in user_vehicles
             if (
                 str(v.id) == v_str
                 or v.registration.lower() == v_str
                 or f"{v.make} {v.model}".lower() in v_str
-                or v.make.lower() in v_str
-                or v.model.lower() in v_str
-            ):
-                matched_vehicle = v
-                break
+            )
+        ]
+        vehicle_matches = exact_vehicle_matches or [
+            v for v in user_vehicles
+            if v.make.lower() in v_str or v.model.lower() in v_str
+        ]
+        if len(vehicle_matches) == 1:
+            matched_vehicle = vehicle_matches[0]
 
     if not matched_vehicle:
-        if len(user_vehicles) == 1:
-            matched_vehicle = user_vehicles[0]
-        else:
-            v_list = ", ".join([f"{v.year} {v.make} {v.model} ({v.registration})" for v in user_vehicles])
-            return {
-                "valid": False,
-                "error_type": "VEHICLE_SELECTION_REQUIRED",
-                "message": f"Please select which vehicle to service from your garage: {v_list}.",
-            }
+        v_list = ", ".join([f"{v.year} {v.make} {v.model} ({v.registration})" for v in user_vehicles])
+        return {
+            "valid": False,
+            "error_type": "VEHICLE_SELECTION_REQUIRED",
+            "message": f"Please select which vehicle to service from your garage: {v_list}.",
+        }
 
     # 3. Service Eligibility
     matched_service = None
@@ -171,16 +172,19 @@ def validate_booking_intent_tool(
             matched_service = db.query(Service).filter(Service.id == int(s_str), Service.is_active == True).first()
         else:
             services = db.query(Service).filter(Service.is_active == True).all()
-            for s in services:
-                if s.name.lower() in s_str or s_str in s.name.lower():
-                    matched_service = s
-                    break
+            service_matches = [
+                s for s in services if s.name.lower() in s_str or s_str in s.name.lower()
+            ]
+            if len(service_matches) == 1:
+                matched_service = service_matches[0]
 
     if not matched_service:
+        available_services = db.query(Service).filter(Service.is_active == True).all()
+        service_list = ", ".join(s.name for s in available_services)
         return {
             "valid": False,
             "error_type": "SERVICE_SELECTION_REQUIRED",
-            "message": "Please specify which service you would like to book (e.g. Oil & Filter Change, Brake Pad Replacement, Home Oil Change).",
+            "message": f"Please specify which service you would like to book: {service_list}.",
         }
 
     if matched_service.service_type == ServiceType.ROADSIDE:

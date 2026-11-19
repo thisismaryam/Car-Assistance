@@ -1,0 +1,126 @@
+diff --git a/backend/app/services/ai/orchestrator.py b/backend/app/services/ai/orchestrator.py
+index 98e401a..40d12f7 100644
+--- a/backend/app/services/ai/orchestrator.py
++++ b/backend/app/services/ai/orchestrator.py
+@@ -38,7 +38,7 @@ Operational Rules:
+    - engine overheating / steam / smoke -> Advise pulling over safely immediately and recommend "Emergency Towing" (Roadside) or "Engine Diagnostics" (Workshop).
+    - squeaking or grinding brakes -> Recommend "Brake Inspection & Pad Replacement" (Workshop).
+    - routine servicing / oil -> Recommend "Full Synthetic Oil Change" (Workshop/Home) or "Standard Vehicle Service".
+-3. Quote all prices in Pakistani Rupees (PKR / Rs.).
++3. Quote all prices in Pakistani Rupees (PKR / Rs.). Use ONLY the prices in the live service catalog given at the end of these instructions; if a service or price is not listed there, say you do not have it instead of guessing. Never state or guess appointment availability: tell the user to ask "availability on YYYY-MM-DD" or use the booking form.
+ 4. Keep answers concise, practical, and strictly under 3 sentences.
+ 5. Never use generic greetings like "Hello, how can I help?" if the user asks a direct question. Address their problem immediately.
+ 6. If the user wants to book an appointment, let them know they can schedule directly via the dashboard or tell you their vehicle and desired date."""
+@@ -71,6 +71,37 @@ def _phone_key(phone: str | None) -> str:
+     return digits[-10:]
+ 
+ 
++# Parsed back out of our own booking summary so that "Confirm" books exactly what was shown.
++SUMMARY_PROMPT_MARKER = "would you like me to confirm and execute this booking now"
++SUMMARY_SERVICE_RE = re.compile(r"\*\*Service\*\*:\s*(.+?)\s*\((?:Workshop|Home|Roadside)\)", re.I)
++SUMMARY_VEHICLE_RE = re.compile(r"\*\*Vehicle\*\*:\s*(.+)")
++SUMMARY_TIME_RE = re.compile(r"\*\*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) UTC\*\*")
++SUMMARY_LOCATION_RE = re.compile(r"\*\*Location\*\*:\s*(.+)")
++
++
++def _pending_booking_from_history(history: list[dict[str, str]]) -> dict[str, Any] | None:
++    """If the last assistant message is our booking summary, return what it proposed."""
++    last = next((m.get("content", "") for m in reversed(history or []) if m.get("role") == "assistant"), "")
++    if SUMMARY_PROMPT_MARKER not in last.lower():
++        return None
++    service = SUMMARY_SERVICE_RE.search(last)
++    vehicle = SUMMARY_VEHICLE_RE.search(last)
++    when = SUMMARY_TIME_RE.search(last)
++    location = SUMMARY_LOCATION_RE.search(last)
++    scheduled_at = None
++    if when:
++        try:
++            scheduled_at = datetime.strptime(when.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
++        except ValueError:
++            scheduled_at = None
++    return {
++        "service_name": service.group(1).strip() if service else None,
++        "vehicle_display": vehicle.group(1).strip() if vehicle else None,
++        "scheduled_at": scheduled_at,
++        "address": location.group(1).strip() if location else None,
++    }
++
++
+ AVAILABILITY_TRIGGER_WORDS = ["available", "availability", "slots", "open slots", "can i come", "time slot", "bay open"]
+ 
+ 
+@@ -82,7 +113,21 @@ class AIAssistantOrchestrator:
+     - Fallback: Deterministic rule-based engine (Grounded RAG and live tools) if Groq is unavailable or key is missing.
+     """
+ 
+-    def call_groq_api(self, message: str, history: list[dict[str, str]]) -> str | None:
++    def _catalog_text(self, db: Session) -> str:
++        """Live service list appended to the LLM prompt so it quotes real prices."""
++        try:
++            services = get_live_services_tool(db)
++        except Exception as exc:  # noqa: BLE001
++            logger.error("Could not load live services for the prompt: %s", exc)
++            return ""
++        if not services:
++            return ""
++        lines = ["", "LIVE SERVICE CATALOG (the only prices you may quote):"]
++        for s in services:
++            lines.append(f"- {s['name']} ({s['category']}): Rs. {s['base_price']:.0f}, about {s['duration_minutes']} min")
++        return "\n".join(lines)
++
++    def call_groq_api(self, message: str, history: list[dict[str, str]], extra_context: str = "") -> str | None:
+         """
+         Executes a real HTTP request to the Groq Chat Completions API.
+         Returns the assistant's reply string, or None if the request fails or key is missing.
+@@ -93,7 +138,7 @@ class AIAssistantOrchestrator:
+             return None
+ 
+         # Build message history for the LLM
+-        messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
++        messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT + extra_context}]
+ 
+         # Include recent history (up to last 6 messages)
+         for h in history[-6:]:
+@@ -414,6 +459,29 @@ class AIAssistantOrchestrator:
+ 
+             address = "Customer Registered Driveway" if matched_service["category"] == "home" else None
+ 
++            # "Confirm" arrives as a bare message, so recover what was proposed from the summary.
++            if is_confirmation:
++                pending = _pending_booking_from_history(history)
++                if pending:
++                    if pending["service_name"]:
++                        by_name = next((s for s in all_services if s["name"].lower() == pending["service_name"].lower()), None)
++                        if by_name:
++                            matched_service = by_name
++                    if pending["vehicle_display"]:
++                        by_display = next(
++                            (v for v in user_vehicles
++                             if f"{v.year} {v.make} {v.model} ({v.registration})" == pending["vehicle_display"]),
++                            None,
++                        )
++                        if by_display:
++                            selected_v = by_display
++                    if pending["scheduled_at"]:
++                        slot_candidate = pending["scheduled_at"]
++                    if pending["address"]:
++                        address = pending["address"]
++                    elif matched_service["category"] != "home":
++                        address = None
++
+             val_result = validate_booking_intent_tool(
+                 db=db,
+                 current_user=current_user,
+@@ -497,7 +565,11 @@ class AIAssistantOrchestrator:
+         # ---------------------------------------------------------
+         # 2. REAL GROQ LLM INFERENCE (Primary for Advice, Diagnostics, FAQs, Inquiries)
+         # ---------------------------------------------------------
+-        llm_reply = self.call_groq_api(message=message, history=history)
++        # Prices and availability must come from the database, never from the LLM.
++        if intent in ("LIVE_PRICING", "LIVE_AVAILABILITY"):
++            return self._execute_rule_based_fallback(intent=intent, db=db, message=message)
++
++        llm_reply = self.call_groq_api(message=message, history=history, extra_context=self._catalog_text(db))
+         if llm_reply:
+             return {
+                 "branch": "groq_llm",

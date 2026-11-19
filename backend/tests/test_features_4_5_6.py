@@ -23,6 +23,8 @@ from app.models.booking import Booking, BookingStatus, Service, ServiceType
 from app.models.roadside import RoadsideRequest, RoadsideAssignment
 from app.models.mechanic import MechanicSchedule
 from app.core.security import hash_password
+from app.schemas.booking import BookingCreate
+from app.services.booking_customer import resolve_booking_customer
 from app.services.ai.rag import rag_retriever
 from app.services.ai.tools import (
     get_live_services_tool,
@@ -256,6 +258,51 @@ class TestFeatures456(unittest.TestCase):
         self.assertEqual(len(auth["vehicles"]), 1)
         self.assertEqual(auth["vehicles"][0]["registration"], "ICT-9988")
 
+    def test_staff_token_does_not_override_guest_booking_email(self):
+        payload = BookingCreate(
+            customer_name="Ahmed Khan",
+            customer_email=self.customer.email.upper(),
+            customer_phone=self.customer.phone,
+            service_id=self.workshop_svc.id,
+            scheduled_at=datetime.now(timezone.utc) + timedelta(days=3),
+        )
+
+        booking_customer = resolve_booking_customer(
+            db=self.db,
+            payload=payload,
+            current_user=self.admin,
+        )
+
+        self.assertEqual(booking_customer.id, self.customer.id)
+        self.assertEqual(booking_customer.email, self.customer.email)
+
+        authenticated_customer = resolve_booking_customer(
+            db=self.db,
+            payload=BookingCreate(
+                customer_email="different@example.com",
+                service_id=self.workshop_svc.id,
+                scheduled_at=datetime.now(timezone.utc) + timedelta(days=3),
+            ),
+            current_user=self.customer,
+        )
+        self.assertEqual(authenticated_customer.id, self.customer.id)
+
+        new_guest_payload = BookingCreate(
+            customer_name="Guest Driver",
+            customer_email="guest.driver@example.com",
+            customer_phone="+923001234567",
+            service_id=self.workshop_svc.id,
+            scheduled_at=datetime.now(timezone.utc) + timedelta(days=3),
+        )
+        new_guest = resolve_booking_customer(
+            db=self.db,
+            payload=new_guest_payload,
+            current_user=self.admin,
+        )
+
+        self.assertEqual(new_guest.email, "guest.driver@example.com")
+        self.assertEqual(new_guest.role, UserRole.CUSTOMER)
+
     def test_conversational_booking_flow_requires_confirmation(self):
         """Verify booking flow requires explicit confirmation before creating records."""
         # Attempt booking without confirmation
@@ -277,7 +324,10 @@ class TestFeatures456(unittest.TestCase):
             db=self.db,
             message="Yes, please confirm",
             history=[
-                {"role": "user", "content": "I want to book an Oil & Filter Change for my Toyota Corolla"},
+                {
+                    "role": "user",
+                    "content": "I want to book an Oil & Filter Change for my Toyota Corolla tomorrow at 11:00 UTC",
+                },
                 {"role": "assistant", "content": response["reply"]},
             ],
             current_user=self.customer,
@@ -293,6 +343,76 @@ class TestFeatures456(unittest.TestCase):
         self.assertIsNotNone(db_booking)
         self.assertEqual(db_booking.customer_id, self.customer.id)
         self.assertEqual(db_booking.vehicle_id, self.vehicle.id)
+
+    def test_booking_does_not_fill_missing_vehicle_service_or_time(self):
+        request = "I want to book an appointment for my car"
+        response = assistant_orchestrator.process_message(
+            db=self.db,
+            message=request,
+            history=[],
+            current_user=self.customer,
+        )
+
+        self.assertIn("Which vehicle", response["reply"])
+        self.assertIn("Which service", response["reply"])
+        self.assertIn("date and time", response["reply"])
+        self.assertIsNone(response["booking_id"])
+        self.assertEqual(self.db.query(Booking).count(), 0)
+
+        cancelled = assistant_orchestrator.process_message(
+            db=self.db,
+            message="no",
+            history=[
+                {"role": "user", "content": request},
+                {"role": "assistant", "content": response["reply"]},
+            ],
+            current_user=self.customer,
+        )
+        self.assertIn("no booking was made", cancelled["reply"].lower())
+        self.assertEqual(self.db.query(Booking).count(), 0)
+
+        validation = validate_booking_intent_tool(
+            db=self.db,
+            current_user=self.customer,
+            vehicle_query=None,
+            service_query=self.workshop_svc.id,
+            scheduled_at=datetime.now(timezone.utc) + timedelta(days=3),
+        )
+        self.assertEqual(validation["error_type"], "VEHICLE_SELECTION_REQUIRED")
+
+    def test_booking_rejection_clears_draft_without_execution(self):
+        request = "Book Oil & Filter Change for Toyota Corolla tomorrow at 11:00 UTC"
+        proposal = assistant_orchestrator.process_message(
+            db=self.db,
+            message=request,
+            history=[],
+            current_user=self.customer,
+        )
+        history = [
+            {"role": "user", "content": request},
+            {"role": "assistant", "content": proposal["reply"]},
+        ]
+
+        rejected = assistant_orchestrator.process_message(
+            db=self.db,
+            message="no/cancel",
+            history=history,
+            current_user=self.customer,
+        )
+
+        self.assertIn("draft", rejected["reply"])
+        self.assertIn("no booking was made", rejected["reply"].lower())
+        self.assertIsNone(rejected["booking_id"])
+        self.assertEqual(self.db.query(Booking).count(), 0)
+
+        after_rejection = assistant_orchestrator.process_message(
+            db=self.db,
+            message="yes",
+            history=history + [{"role": "assistant", "content": rejected["reply"]}],
+            current_user=self.customer,
+        )
+        self.assertIsNone(after_rejection["booking_id"])
+        self.assertEqual(self.db.query(Booking).count(), 0)
 
     # --- FEATURE 6 TESTS ---
 
