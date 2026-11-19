@@ -160,6 +160,12 @@ export default function AdminBookingsPage() {
                                             <span className={`inline-block mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${b.service?.service_type === "home" ? "bg-purple-500/15 text-purple-300" : "bg-blue-500/15 text-blue-300"}`}>
                                                 {b.service?.service_type}
                                             </span>
+                                            {b.notes && (
+                                                <p className="mt-2 max-w-xs whitespace-pre-wrap break-words rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
+                                                    <span className="font-bold uppercase text-[10px] text-amber-400">Customer note: </span>
+                                                    {b.notes}
+                                                </p>
+                                            )}
                                         </td>
                                         <td className="px-5 py-3.5">
                                             {b.mechanic ? (

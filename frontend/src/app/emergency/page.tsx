@@ -23,6 +23,26 @@ const LIFECYCLE_STAGES = [
     { key: "resolved", label: "6. Resolved" },
 ];
 
+const API = "http://localhost:8000";
+const GUEST_KEY = "guest_roadside";
+
+// A guest has no account; we remember { id, token } of their request in this browser
+// so the live tracker survives a page refresh.
+function readGuestSession(): { id: number; token: string } | null {
+    try {
+        const raw = localStorage.getItem(GUEST_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return parsed?.id && parsed?.token ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+function clearGuestSession() {
+    try { localStorage.removeItem(GUEST_KEY); } catch { /* ignore */ }
+}
+
 export default function EmergencyPage() {
     const router = useRouter();
     const [user, setUser] = useState<any>(null);
@@ -37,17 +57,44 @@ export default function EmergencyPage() {
     const [errorMsg, setErrorMsg] = useState<string>("");
     const [wsConnected, setWsConnected] = useState<boolean>(false);
     const [cancelling, setCancelling] = useState(false);
+    // Guest (not logged in) details
+    const [guestName, setGuestName] = useState<string>("");
+    const [guestPhone, setGuestPhone] = useState<string>("");
+    const [guestEmail, setGuestEmail] = useState<string>("");
+    const [guestVehicle, setGuestVehicle] = useState<string>("");
+    const [guestToken, setGuestToken] = useState<string | null>(null);
 
     const wsRef = useRef<WebSocket | null>(null);
 
     // Fetch active user and vehicles, and check for any existing active roadside incident
     useEffect(() => {
         const token = localStorage.getItem("token");
-        if (!token) return;
+        if (!token) {
+            // Guest: resume tracking of their own request, if they have one in this browser
+            const guest = readGuestSession();
+            if (guest) {
+                fetch(`${API}/roadside/${guest.id}?token=${encodeURIComponent(guest.token)}`)
+                    .then(r => r.ok ? r.json() : null)
+                    .then(data => {
+                        if (data && !["resolved", "cancelled"].includes((data.status || "").toLowerCase())) {
+                            setGuestToken(guest.token);
+                            setActiveIncident(data);
+                        } else {
+                            clearGuestSession();
+                        }
+                    })
+                    .catch(() => {});
+            }
+            return;
+        }
 
         const headers = { Authorization: `Bearer ${token}` };
         Promise.all([
-            fetch("http://localhost:8000/auth/me", { headers }).then(r => r.ok ? r.json() : null),
+            fetch("http://localhost:8000/auth/me", { headers }).then(r => {
+                // Stale / expired login: drop it so the person can continue as a guest.
+                if (r.status === 401) localStorage.removeItem("token");
+                return r.ok ? r.json() : null;
+            }),
             fetch("http://localhost:8000/vehicles/my-vehicles", { headers }).then(r => r.ok ? r.json() : []),
             fetch("http://localhost:8000/roadside/my", { headers }).then(r => r.ok ? r.json() : []),
         ]).then(([userData, vehicleData, roadsideData]) => {
@@ -77,7 +124,10 @@ export default function EmergencyPage() {
 
         const connectCustomerWS = () => {
             try {
-                socket = new WebSocket(`ws://localhost:8000/roadside/ws/customer/${incidentId}`);
+                socket = new WebSocket(
+                    `ws://localhost:8000/roadside/ws/customer/${incidentId}` +
+                    (guestToken ? `?token=${encodeURIComponent(guestToken)}` : "")
+                );
                 wsRef.current = socket;
 
                 socket.onopen = () => {
@@ -114,9 +164,12 @@ export default function EmergencyPage() {
         // 5-second polling fallback
         const pollInterval = setInterval(() => {
             const token = localStorage.getItem("token");
-            if (!token) return;
-            fetch(`http://localhost:8000/roadside/${incidentId}`, {
-                headers: { Authorization: `Bearer ${token}` }
+            if (!token && !guestToken) return;
+            const url = guestToken
+                ? `${API}/roadside/${incidentId}?token=${encodeURIComponent(guestToken)}`
+                : `${API}/roadside/${incidentId}`;
+            fetch(url, {
+                headers: !guestToken && token ? { Authorization: `Bearer ${token}` } : {}
             })
                 .then(res => res.ok ? res.json() : null)
                 .then(data => {
@@ -130,7 +183,7 @@ export default function EmergencyPage() {
             if (reconnectTimer) clearTimeout(reconnectTimer);
             if (socket) socket.close();
         };
-    }, [activeIncident?.id]);
+    }, [activeIncident?.id, guestToken]);
 
     const handleGetLocation = () => {
         if (!navigator.geolocation) {
@@ -166,26 +219,47 @@ export default function EmergencyPage() {
             return;
         }
 
+        // Logged in -> send the token. Otherwise submit as a guest (no account needed).
         const token = localStorage.getItem("token");
-        if (!token) {
-            setErrorMsg("Please log in to submit a dispatch request, or call our 24/7 hotline directly.");
-            return;
+        const asGuest = !token;
+
+        if (asGuest) {
+            if (guestName.trim().length < 2) {
+                setErrorMsg("Please enter your name.");
+                return;
+            }
+            if (guestPhone.replace(/\D/g, "").length < 7) {
+                setErrorMsg("Please enter a valid phone number so our team can call you.");
+                return;
+            }
+            if (!guestVehicle.trim()) {
+                setErrorMsg("Please describe your vehicle (make, model, registration).");
+                return;
+            }
         }
 
         setSubmitting(true);
 
         try {
-            const res = await fetch("http://localhost:8000/roadside/", {
+            const res = await fetch(`${API}/roadside/`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
                 },
                 body: JSON.stringify({
-                    vehicle_id: selectedVehicle ? parseInt(selectedVehicle) : null,
+                    vehicle_id: !asGuest && selectedVehicle ? parseInt(selectedVehicle) : null,
                     location: location.trim(),
                     issue_type: issueType,
                     notes: notes.trim() || null,
+                    ...(asGuest
+                        ? {
+                              guest_name: guestName.trim(),
+                              guest_phone: guestPhone.trim(),
+                              guest_email: guestEmail.trim() || null,
+                              guest_vehicle: guestVehicle.trim(),
+                          }
+                        : {}),
                 })
             });
 
@@ -195,6 +269,15 @@ export default function EmergencyPage() {
             }
 
             const data = await res.json();
+            if (data.tracking_token) {
+                // Guest request: keep the private token so this browser can track / cancel it
+                try {
+                    localStorage.setItem(GUEST_KEY, JSON.stringify({ id: data.id, token: data.tracking_token }));
+                } catch { /* private mode: tracking still works until refresh */ }
+                setGuestToken(data.tracking_token);
+            } else {
+                setGuestToken(null);
+            }
             setActiveIncident(data);
         } catch (err: any) {
             setErrorMsg(err.message || "An error occurred submitting request.");
@@ -210,17 +293,22 @@ export default function EmergencyPage() {
         setCancelling(true);
 
         try {
-            const res = await fetch(`http://localhost:8000/roadside/${activeIncident.id}/status`, {
+            const res = await fetch(
+                `${API}/roadside/${activeIncident.id}/status` +
+                    (guestToken ? `?token=${encodeURIComponent(guestToken)}` : ""),
+                {
                 method: "PATCH",
                 headers: {
                     "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`
+                    ...(!guestToken && token ? { Authorization: `Bearer ${token}` } : {}),
                 },
                 body: JSON.stringify({ status: "cancelled", notes: "Cancelled by customer" }),
-            });
+                }
+            );
             if (res.ok) {
                 const updated = await res.json();
                 setActiveIncident(updated);
+                if (guestToken) clearGuestSession();
             }
         } finally {
             setCancelling(false);
@@ -348,6 +436,12 @@ export default function EmergencyPage() {
                             <span className="text-gray-400">Live GPS Coordinates</span>
                             <span className="text-white font-mono text-right max-w-xs truncate">{activeIncident.location}</span>
                         </div>
+                        {!activeIncident.vehicle && activeIncident.guest_vehicle && (
+                            <div className="flex justify-between py-1">
+                                <span className="text-gray-400">Vehicle</span>
+                                <span className="text-white">{activeIncident.guest_vehicle}</span>
+                            </div>
+                        )}
                         {activeIncident.vehicle && (
                             <div className="flex justify-between py-1">
                                 <span className="text-gray-400">Vehicle</span>
@@ -374,7 +468,7 @@ export default function EmergencyPage() {
                             </button>
                         )}
                         <button
-                            onClick={() => { setActiveIncident(null); setLocation(""); setNotes(""); }}
+                            onClick={() => { setActiveIncident(null); setLocation(""); setNotes(""); setGuestToken(null); clearGuestSession(); }}
                             className="bg-[#2563EB] hover:bg-blue-700 text-white text-xs font-bold py-2.5 px-4 rounded-lg transition-colors flex-1"
                         >
                             Log New Emergency Alert
@@ -399,7 +493,7 @@ export default function EmergencyPage() {
 
                     {!user && (
                         <div className="p-3.5 mb-6 rounded-md bg-[#090D14] border border-[#1e293b] text-xs flex justify-between items-center">
-                            <span className="text-gray-300">Have an account? Log in to automatically attach your vehicle & details.</span>
+                            <span className="text-gray-300">Have an account? Log in to attach your vehicle & details. No account? Just fill in the form below.</span>
                             <Link href="/login" className="bg-[#2563EB] hover:bg-blue-700 text-white font-bold px-3 py-1.5 rounded transition-colors">
                                 Log In
                             </Link>
@@ -410,7 +504,8 @@ export default function EmergencyPage() {
                         {/* 1. SELECT VEHICLE */}
                         <div>
                             <label className="block text-xs font-medium text-gray-300 mb-1.5">
-                                Select Vehicle
+                                {user || vehicles.length > 0 ? "Select Vehicle" : "Your Vehicle"}
+                                {!user && vehicles.length === 0 && <span className="text-red-400"> *</span>}
                             </label>
                             {vehicles.length > 0 ? (
                                 <select
@@ -425,11 +520,63 @@ export default function EmergencyPage() {
                                     ))}
                                 </select>
                             ) : (
-                                <p className="text-xs text-gray-400 p-2.5 bg-[#090D14] rounded-lg border border-[#1e293b]">
-                                    {user ? "No registered vehicles found in your garage (will submit as unregistered)." : "Log in to link your registered garage vehicle."}
-                                </p>
+                                user ? (
+                                    <p className="text-xs text-gray-400 p-2.5 bg-[#090D14] rounded-lg border border-[#1e293b]">
+                                        No registered vehicles found in your garage (will submit as unregistered).
+                                    </p>
+                                ) : (
+                                    <input
+                                        type="text"
+                                        placeholder="e.g. Toyota Corolla 2018, LEA-1234"
+                                        value={guestVehicle}
+                                        onChange={(e) => setGuestVehicle(e.target.value)}
+                                        className="w-full bg-[#090D14] border border-[#1e293b] text-white p-2.5 rounded-lg text-xs outline-none focus:border-[#2563EB]"
+                                    />
+                                )
                             )}
                         </div>
+
+                        {/* 1b. GUEST CONTACT DETAILS (only when not logged in) */}
+                        {!user && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-300 mb-1.5">
+                                        Your Name <span className="text-red-400">*</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        placeholder="Full name"
+                                        value={guestName}
+                                        onChange={(e) => setGuestName(e.target.value)}
+                                        className="w-full bg-[#090D14] border border-[#1e293b] text-white p-2.5 rounded-lg text-xs outline-none focus:border-[#2563EB]"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-medium text-gray-300 mb-1.5">
+                                        Phone Number <span className="text-red-400">*</span>
+                                    </label>
+                                    <input
+                                        type="tel"
+                                        placeholder="+92 300 0000000"
+                                        value={guestPhone}
+                                        onChange={(e) => setGuestPhone(e.target.value)}
+                                        className="w-full bg-[#090D14] border border-[#1e293b] text-white p-2.5 rounded-lg text-xs outline-none focus:border-[#2563EB]"
+                                    />
+                                </div>
+                                <div className="sm:col-span-2">
+                                    <label className="block text-xs font-medium text-gray-300 mb-1.5">
+                                        Email (Optional)
+                                    </label>
+                                    <input
+                                        type="email"
+                                        placeholder="you@example.com"
+                                        value={guestEmail}
+                                        onChange={(e) => setGuestEmail(e.target.value)}
+                                        className="w-full bg-[#090D14] border border-[#1e293b] text-white p-2.5 rounded-lg text-xs outline-none focus:border-[#2563EB]"
+                                    />
+                                </div>
+                            </div>
+                        )}
 
                         {/* 2. SELECT EMERGENCY ISSUE */}
                         <div>

@@ -1,5 +1,8 @@
+import asyncio
+import re
+import secrets
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.orm import Session, joinedload
 from app.database import get_db
 from app.models.roadside import RoadsideRequest, RoadsideAssignment
@@ -7,12 +10,15 @@ from app.models.vehicle import Vehicle
 from app.models.user import User, UserRole
 from app.schemas.roadside import (
     RoadsideCreate,
+    RoadsideCreated,
     RoadsideRead,
     RoadsideStatusUpdate,
     RoadsideAssignPayload,
     RoadsideAssignmentRead,
 )
-from app.core.security import get_current_user, require_admin
+from app.core.security import get_current_user, get_optional_current_user, require_admin
+from app.core.limiter import limiter
+from app.utils.admin_notify import notify_admin
 from app.services.roadside_dispatch import dispatch_manager
 
 router = APIRouter()
@@ -29,6 +35,18 @@ ALLOWED_LIFECYCLE_STATUSES = [
 ]
 
 
+def _token_matches(record: RoadsideRequest, token: str | None) -> bool:
+    """True when `token` is the guest tracking token of `record` (constant-time compare)."""
+    if not token or not record.tracking_token:
+        return False
+    return secrets.compare_digest(record.tracking_token, token)
+
+
+def _clean(value: str | None) -> str | None:
+    value = (value or "").strip()
+    return value or None
+
+
 def _format_roadside_dict(r: RoadsideRequest) -> dict:
     """Serializes a RoadsideRequest object to a dictionary for real-time WebSocket payloads."""
     return {
@@ -39,6 +57,10 @@ def _format_roadside_dict(r: RoadsideRequest) -> dict:
         "issue_type": r.issue_type,
         "status": r.status,
         "notes": r.notes,
+        "guest_name": r.guest_name,
+        "guest_phone": r.guest_phone,
+        "guest_email": r.guest_email,
+        "guest_vehicle": r.guest_vehicle,
         "assigned_mechanic_id": r.assigned_mechanic_id,
         "assigned_mechanic": {
             "id": r.assigned_mechanic.id,
@@ -70,32 +92,72 @@ def _format_roadside_dict(r: RoadsideRequest) -> dict:
     }
 
 
-@router.post("/", response_model=RoadsideRead, status_code=201)
+@router.post("/", response_model=RoadsideCreated, status_code=201)
+@limiter.limit("10/minute")
 async def create_roadside_request(
+    request: Request,
     payload: RoadsideCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User | None = Depends(get_optional_current_user)
 ):
     """
     FEATURE 4: Emergency dispatch workflow capturing complete incident data:
     issue type, vehicle, location, customer notes, and timestamps under unique request IDs.
     Persists to PostgreSQL with immediate streaming to the dedicated admin queue.
+
+    Works for logged-in customers (as before) AND for guests: a person in an emergency
+    must not need an account. Guests send name + phone + vehicle text and receive a
+    private tracking_token used to follow / cancel their own request.
     """
-    if payload.vehicle_id:
-        vehicle = db.query(Vehicle).filter(
-            Vehicle.id == payload.vehicle_id,
-            Vehicle.owner_id == current_user.id
-        ).first()
-        if not vehicle:
-            raise HTTPException(status_code=404, detail="Vehicle not found or does not belong to your account")
+    location = payload.location.strip()
+    issue_type = payload.issue_type.strip()
+    if not location:
+        raise HTTPException(status_code=400, detail="Please provide your location")
+    if not issue_type:
+        raise HTTPException(status_code=400, detail="Please choose the type of emergency")
+
+    guest_fields: dict = {}
+    tracking_token = None
+    vehicle_id = None
+
+    if current_user is not None:
+        if payload.vehicle_id:
+            vehicle = db.query(Vehicle).filter(
+                Vehicle.id == payload.vehicle_id,
+                Vehicle.owner_id == current_user.id
+            ).first()
+            if not vehicle:
+                raise HTTPException(status_code=404, detail="Vehicle not found or does not belong to your account")
+            vehicle_id = vehicle.id
+        user_id = current_user.id
+    else:
+        name = _clean(payload.guest_name)
+        phone = _clean(payload.guest_phone)
+        vehicle_text = _clean(payload.guest_vehicle)
+        if not name or len(name) < 2:
+            raise HTTPException(status_code=400, detail="Please enter your name")
+        if not phone or len(re.sub(r"\D", "", phone)) < 7:
+            raise HTTPException(status_code=400, detail="Please enter a valid phone number so our team can call you")
+        if not vehicle_text:
+            raise HTTPException(status_code=400, detail="Please describe your vehicle (make, model, registration)")
+        user_id = None
+        tracking_token = secrets.token_urlsafe(32)
+        guest_fields = {
+            "guest_name": name[:150],
+            "guest_phone": phone[:30],
+            "guest_email": (_clean(payload.guest_email) or "")[:255] or None,
+            "guest_vehicle": vehicle_text[:200],
+            "tracking_token": tracking_token,
+        }
 
     roadside = RoadsideRequest(
-        user_id=current_user.id,
-        vehicle_id=payload.vehicle_id,
-        location=payload.location.strip(),
-        issue_type=payload.issue_type.strip(),
+        user_id=user_id,
+        vehicle_id=vehicle_id,
+        location=location,
+        issue_type=issue_type,
         notes=payload.notes.strip() if payload.notes else None,
-        status="requested"
+        status="requested",
+        **guest_fields,
     )
     db.add(roadside)
     db.commit()
@@ -119,7 +181,40 @@ async def create_roadside_request(
     except Exception:
         pass
 
-    return record
+    # Email the staff inbox (if ADMIN_NOTIFY_EMAIL is set). Run in a thread so a slow
+    # SMTP server cannot block other requests; failures are ignored.
+    try:
+        who = (
+            f"{record.user.full_name} | {record.user.phone} | {record.user.email}"
+            if record.user
+            else f"GUEST: {record.guest_name} | {record.guest_phone}"
+            + (f" | {record.guest_email}" if record.guest_email else "")
+        )
+        car = (
+            f"{record.vehicle.year} {record.vehicle.make} {record.vehicle.model} ({record.vehicle.registration})"
+            if record.vehicle
+            else (record.guest_vehicle or "not provided")
+        )
+        await asyncio.to_thread(
+            notify_admin,
+            f"EMERGENCY roadside request #{record.id} - {record.issue_type}",
+            (
+                f"New roadside request #{record.id}\n\n"
+                f"Issue: {record.issue_type}\n"
+                f"Location: {record.location}\n"
+                f"Customer: {who}\n"
+                f"Vehicle: {car}\n"
+                + (f"\nNote:\n{record.notes}\n" if record.notes else "")
+                + "\nOpen the admin roadside console to dispatch a mechanic."
+            ),
+        )
+    except Exception:
+        pass
+
+    # The secret token is attached to the response only (never stored in broadcasts / lists).
+    result = RoadsideCreated.model_validate(record)
+    result.tracking_token = tracking_token
+    return result
 
 
 @router.get("/my", response_model=list[RoadsideRead])
@@ -162,8 +257,9 @@ def get_all_roadside_requests(
 @router.get("/{request_id}", response_model=RoadsideRead)
 def get_roadside_request(
     request_id: int,
+    token: str | None = Query(default=None, description="Guest tracking token"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User | None = Depends(get_optional_current_user)
 ):
     query = (
         db.query(RoadsideRequest)
@@ -175,11 +271,14 @@ def get_roadside_request(
         )
         .filter(RoadsideRequest.id == request_id)
     )
-    if current_user.role != UserRole.ADMIN:
-        query = query.filter(RoadsideRequest.user_id == current_user.id)
-
     record = query.first()
     if not record:
+        raise HTTPException(status_code=404, detail="Roadside request not found or unauthorized")
+
+    is_admin = current_user is not None and current_user.role == UserRole.ADMIN
+    is_owner = current_user is not None and record.user_id == current_user.id
+    if not (is_admin or is_owner or _token_matches(record, token)):
+        # Same message for "missing" and "forbidden" so IDs can't be probed.
         raise HTTPException(status_code=404, detail="Roadside request not found or unauthorized")
     return record
 
@@ -263,8 +362,9 @@ async def assign_roadside_provider(
 async def update_roadside_status(
     request_id: int,
     payload: RoadsideStatusUpdate,
+    token: str | None = Query(default=None, description="Guest tracking token"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User | None = Depends(get_optional_current_user)
 ):
     """
     FEATURE 4: Track lifecycle statuses (requested, accepted, assigned, en route, arrived, resolved, cancelled)
@@ -292,8 +392,12 @@ async def update_roadside_status(
             detail=f"Invalid lifecycle status '{payload.status}'. Allowed: requested, accepted, assigned, en route, arrived, resolved, cancelled"
         )
 
-    if current_user.role != UserRole.ADMIN:
-        if roadside.user_id != current_user.id:
+    is_admin = current_user is not None and current_user.role == UserRole.ADMIN
+    if not is_admin:
+        is_owner = current_user is not None and roadside.user_id == current_user.id
+        if not (is_owner or _token_matches(roadside, token)):
+            if current_user is None:
+                raise HTTPException(status_code=401, detail="Authentication required")
             raise HTTPException(status_code=403, detail="Not authorized to update this incident")
         if requested_status != "cancelled":
             raise HTTPException(status_code=403, detail="Customers can only cancel active requests")
@@ -373,10 +477,20 @@ async def websocket_admin_endpoint(websocket: WebSocket):
 
 
 @router.websocket("/ws/customer/{request_id}")
-async def websocket_customer_endpoint(websocket: WebSocket, request_id: int):
+async def websocket_customer_endpoint(
+    websocket: WebSocket,
+    request_id: int,
+    token: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
     """
     Customer real-time stream for live lifecycle updates (en route, arrived, resolved, etc.).
+    Guest requests (no account) require their private tracking token: ?token=...
     """
+    record = db.query(RoadsideRequest).filter(RoadsideRequest.id == request_id).first()
+    if record is not None and record.user_id is None and not _token_matches(record, token):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     await dispatch_manager.connect_customer(request_id, websocket)
     try:
         while True:

@@ -9,6 +9,11 @@ class RoadsideCreate(BaseModel):
     location: str
     issue_type: str
     notes: str | None = None
+    # Guest (not logged in) contact details. Required when no valid login is sent.
+    guest_name: str | None = None
+    guest_phone: str | None = None
+    guest_email: str | None = None
+    guest_vehicle: str | None = None
 
 
 class RoadsideAssignPayload(BaseModel):
@@ -41,12 +46,17 @@ class RoadsideRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    user_id: int
+    user_id: int | None = None
     vehicle_id: int | None
     location: str
     issue_type: str
     status: str
     notes: str | None
+
+    guest_name: str | None = None
+    guest_phone: str | None = None
+    guest_email: str | None = None
+    guest_vehicle: str | None = None
 
     assigned_mechanic_id: int | None = None
     accepted_at: datetime | None = None
@@ -59,7 +69,14 @@ class RoadsideRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    user: UserRead
+    user: UserRead | None = None
     vehicle: VehicleRead | None = None
     assigned_mechanic: UserRead | None = None
     assignments: list[RoadsideAssignmentRead] = []
+
+
+class RoadsideCreated(RoadsideRead):
+    """Response of POST /roadside/. The tracking token is only ever returned here,
+    once, to the person who created the request (guests need it to track/cancel)."""
+
+    tracking_token: str | None = None

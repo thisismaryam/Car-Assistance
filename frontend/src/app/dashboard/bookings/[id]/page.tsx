@@ -26,16 +26,22 @@ export default function BookingDetailsPage() {
         }
 
         try {
-            let res: Response;
+            let res: Response | null = null;
             if (token) {
                 res = await fetch(`http://localhost:8000/bookings/${bookingId}`, { headers });
-            } else {
+                if (res.status === 401) {
+                    // Stale/expired login: forget it and fall back to the email + phone lookup below.
+                    localStorage.removeItem("token");
+                    res = null;
+                }
+            }
+            if (!res) {
                 let contact: any = null;
                 try {
                     contact = JSON.parse(sessionStorage.getItem("guest_contact") || "null");
                 } catch { }
                 if (!contact?.email || !contact?.phone) {
-                    throw new Error("Please look up your bookings with your email and phone first.");
+                    throw new Error("Your session expired. Please log in again, or look up your bookings with your email and phone.");
                 }
                 res = await fetch(`http://localhost:8000/bookings/${bookingId}/view`, {
                     method: "POST",

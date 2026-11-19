@@ -1,12 +1,15 @@
 import json
 import logging
 import re
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, date as py_date, timedelta, timezone
 from typing import Any
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload
 from app.core.config import settings
+from app.models.booking import Booking
 from app.models.user import User
 from app.models.vehicle import Vehicle
 from app.services.ai.rag import rag_retriever
@@ -46,6 +49,28 @@ BOOKING_TRIGGER_WORDS = [
 ]
 CONFIRMATION_WORDS = ["confirm", "yes", "proceed", "go ahead", "do it", "sure", "confirmed", "confirm booking"]
 PRICING_TRIGGER_WORDS = ["price", "cost", "how much", "rate", "fee", "rates", "pricing", "services list", "what services"]
+# "Tell me about the appointment I made" is a LOOKUP of an existing booking, not a new booking.
+CREATE_BOOKING_VERB = re.compile(r"\b(book|reserve|schedule)\b", re.I)
+LOOKUP_PATTERNS = [
+    re.compile(r"\b(my|our)\b.{0,40}\b(appointment|booking|reservation)s?\b", re.I),
+    re.compile(r"\b(appointment|booking|reservation)s?\b.{0,30}\b(i|we)\s+(made|booked|have|did)\b", re.I),
+    re.compile(r"\b(status|details?|check|find|look\s*up|show)\b.{0,30}\b(appointment|booking|reservation)s?\b", re.I),
+    re.compile(r"\bbooking\s*#?\d+\b", re.I),
+]
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+PHONE_RE = re.compile(r"\+?\d[\d\s\-()]{5,}\d")
+LOOKUP_ASK_MARKER = "email address and the phone number"
+MAX_LOOKUP_FAILURES = 5          # per email, per window
+LOOKUP_WINDOW_SECONDS = 15 * 60
+_lookup_failures: dict[str, list[float]] = {}
+
+
+def _phone_key(phone: str | None) -> str:
+    """Digits only, last 10 - same rule as POST /bookings/lookup."""
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    return digits[-10:]
+
+
 AVAILABILITY_TRIGGER_WORDS = ["available", "availability", "slots", "open slots", "can i come", "time slot", "bay open"]
 
 
@@ -120,6 +145,16 @@ class AIAssistantOrchestrator:
             if "would you like me to confirm and execute this booking now" in last_assistant_msg.lower():
                 if any(w in msg for w in CONFIRMATION_WORDS) or msg in ["yes", "y", "confirm"]:
                     return "BOOKING_CONFIRMATION"
+
+        # Follow-up to "please share your email and phone": the reply carries the email
+        if history:
+            last_assistant = next((m.get("content", "") for m in reversed(history) if m.get("role") == "assistant"), "")
+            if LOOKUP_ASK_MARKER in last_assistant and EMAIL_RE.search(message):
+                return "BOOKING_LOOKUP"
+
+        # Asking about an existing booking (unless they clearly want to create one)
+        if not CREATE_BOOKING_VERB.search(msg) and any(p.search(msg) for p in LOOKUP_PATTERNS):
+            return "BOOKING_LOOKUP"
 
         # Check booking triggers
         if any(w in msg for w in BOOKING_TRIGGER_WORDS):
@@ -231,6 +266,71 @@ class AIAssistantOrchestrator:
             "booking_link": None,
         }
 
+    # ------------------------------------------------------------------
+    # Look up existing bookings (guests identify with email + phone, like the website)
+    # ------------------------------------------------------------------
+    def _handle_booking_lookup(self, db: Session, message: str, history: list[dict[str, str]],
+                               current_user: User | None) -> dict[str, Any]:
+        def reply(text: str) -> dict[str, Any]:
+            return {"branch": "booking_lookup", "reply": text, "booking_id": None, "booking_link": None}
+
+        user = current_user
+        if user is None:
+            # the details may have been given across several messages
+            user_texts = [m.get("content", "") for m in history[-6:] if m.get("role") == "user"]
+            text = " ".join(user_texts + [message])
+            email_m = EMAIL_RE.search(text)
+            email = email_m.group(0).lower() if email_m else None
+            phone_candidates = [
+                _phone_key(m.group(0)) for m in PHONE_RE.finditer(EMAIL_RE.sub(" ", text))
+            ]
+            phone = next((p for p in phone_candidates if len(p) >= 7), None)
+
+            if not email or not phone:
+                return reply(
+                    "I can look up your booking. Please share the email address and the phone number "
+                    "you used when booking, for example: my email is name@gmail.com and my phone is 0300 1234567."
+                )
+
+            now = time.time()
+            recent = [t for t in _lookup_failures.get(email, []) if now - t < LOOKUP_WINDOW_SECONDS]
+            if len(recent) >= MAX_LOOKUP_FAILURES:
+                return reply("Too many unsuccessful attempts. Please wait a few minutes and try again.")
+
+            candidate = db.query(User).filter(func.lower(User.email) == email).first()
+            if not candidate or _phone_key(candidate.phone) != phone:
+                recent.append(now)
+                _lookup_failures[email] = recent
+                return reply(
+                    "I couldn't find bookings for those details. Please check the email and phone number "
+                    "you used when booking."
+                )
+            _lookup_failures.pop(email, None)
+            user = candidate
+
+        bookings = (
+            db.query(Booking)
+            .options(joinedload(Booking.vehicle), joinedload(Booking.service))
+            .filter(Booking.customer_id == user.id)
+            .order_by(Booking.scheduled_at.desc())
+            .limit(5)
+            .all()
+        )
+        if not bookings:
+            return reply("I don't see any bookings under those details yet. You can book from the "
+                         "[Workshop](/dashboard/workshop) or [At-home service](/dashboard/home-service) pages.")
+
+        lines = []
+        for b in bookings:
+            when = b.scheduled_at.strftime("%b %d, %Y %I:%M %p UTC")
+            v = f"{b.vehicle.year} {b.vehicle.make} {b.vehicle.model}" if b.vehicle else "vehicle"
+            status = b.status.value if hasattr(b.status, "value") else str(b.status)
+            lines.append(f"• #{b.id}: {b.service.name} for {v}, {when}, {status}")
+        return reply(
+            f"Hi {user.full_name}, here are your latest bookings:\n\n" + "\n".join(lines) +
+            "\n\nSee full details in [My bookings](/dashboard/bookings)."
+        )
+
     def process_message(
         self,
         db: Session,
@@ -240,17 +340,25 @@ class AIAssistantOrchestrator:
     ) -> dict[str, Any]:
         intent = self.classify_intent(message, history)
 
+        if intent == "BOOKING_LOOKUP":
+            return self._handle_booking_lookup(db, message, history, current_user)
+
         # ---------------------------------------------------------
         # 1. CORE BOOKING EXECUTION FLOWS (Preserved to maintain booking capabilities)
         # ---------------------------------------------------------
         if intent in ["BOOKING_CONFIRMATION", "BOOKING_FLOW"]:
-            # Validate Authentication
+            # Customers book as guests (no account), so send them to the booking forms
+            # instead of a login. The conversational flow below needs a saved garage,
+            # which only logged-in accounts have.
             if not current_user:
                 return {
                     "branch": "conversational_booking",
                     "reply": (
-                        "To schedule or execute an appointment, you must be logged in so I can access your garage. "
-                        "Please [Log In to Your Account](/login) and then let me know what service you need!"
+                        "You can book without creating an account. Pick the service type and fill in your details:\n\n"
+                        "• [Workshop appointment](/dashboard/workshop)\n"
+                        "• [At-home service](/dashboard/home-service)\n\n"
+                        "You will get a confirmation email, and you can view your booking anytime in "
+                        "[My bookings](/dashboard/bookings) with your email and phone number."
                     ),
                     "booking_id": None,
                     "booking_link": None,
@@ -263,7 +371,7 @@ class AIAssistantOrchestrator:
                     "branch": "conversational_booking",
                     "reply": (
                         "You don't have any registered vehicles in your garage. "
-                        "Please add your vehicle in [My Garage](/dashboard/vehicles) first before scheduling an appointment."
+                        "Please use the [booking form](/dashboard/workshop) to add your vehicle details while booking."
                     ),
                     "booking_id": None,
                     "booking_link": None,

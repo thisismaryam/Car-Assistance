@@ -12,6 +12,7 @@ from app.schemas.booking import BookingCreate, BookingLookup, BookingRead, Statu
 from app.schemas.mechanic import AssignMechanicPayload
 from app.core.security import get_current_user, get_optional_current_user, require_admin, hash_password
 from app.utils.email import send_email
+from app.utils.admin_notify import notify_admin
 from app.utils.google_calendar import create_booking_event, delete_booking_event
 from app.services.availability import (
     calculate_slot_availability,
@@ -269,6 +270,24 @@ def create_booking(
         booking.google_event_id = event_id
         db.commit()
         db.refresh(booking)
+
+    # 10c. Tell staff when the customer left a note, so it is not missed.
+    if booking.notes and booking.notes.strip():
+        try:
+            notify_admin(
+                subject=f"Customer note on booking #{booking.id} - {service.name}",
+                body=(
+                    f"A customer left a note with their booking.\n\n"
+                    f"Booking: #{booking.id} ({service.name})\n"
+                    f"When: {booking.scheduled_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+                    f"Customer: {user.full_name} | {user.phone} | {user.email}\n"
+                    f"Vehicle: {vehicle.year} {vehicle.make} {vehicle.model} ({vehicle.registration})\n"
+                    + (f"Address: {booking.address}\n" if booking.address else "")
+                    + f"\nNote:\n{booking.notes.strip()}\n"
+                ),
+            )
+        except Exception as notify_err:
+            print(f"[ADMIN NOTIFY ERROR] {notify_err}")
 
     # 11. Confirmation email, sent AFTER the calendar step so it can say whether the
     #     event was added. Sent even if the calendar failed.

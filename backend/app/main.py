@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.database import engine, Base
 import app.models  # Registers all models including RoadsideRequest
-from app.api.endpoints import auth, bookings, services, vehicles, roadside, chat, mechanics
+from app.api.endpoints import auth, bookings, services, vehicles, roadside, chat, mechanics, voice
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.core.limiter import limiter
@@ -28,6 +28,7 @@ app.include_router(mechanics.router, prefix="/admin/mechanics", tags=["Mechanic 
 app.include_router(mechanics.router, prefix="/mechanics", tags=["Mechanic Management"])
 app.include_router(chat.router, prefix="/api/chat", tags=["AI Chatbot"])
 app.include_router(chat.router, prefix="/chat", tags=["AI Chatbot"])
+app.include_router(voice.router, prefix="/api/voice", tags=["AI Voice"])
 
 
 @app.get("/health")

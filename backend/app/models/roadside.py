@@ -13,8 +13,9 @@ class RoadsideRequest(Base):
     __tablename__ = "roadside_requests"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    # NULL for guest (not logged in) emergency requests
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
     )
     vehicle_id: Mapped[int | None] = mapped_column(
         ForeignKey("vehicles.id", ondelete="SET NULL"), nullable=True, index=True
@@ -24,6 +25,14 @@ class RoadsideRequest(Base):
     # Lifecycle statuses: requested, accepted, assigned, en_route (or en route), arrived, resolved, cancelled
     status: Mapped[str] = mapped_column(String(50), default="requested", index=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Guest contact details (only filled when user_id is NULL)
+    guest_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    guest_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    guest_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    guest_vehicle: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Secret handed to the guest so only they can track / cancel their request
+    tracking_token: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
 
     # Provider / Mechanic assignment
     assigned_mechanic_id: Mapped[int | None] = mapped_column(
@@ -45,7 +54,7 @@ class RoadsideRequest(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    user: Mapped["User"] = relationship("User", foreign_keys=[user_id], back_populates="roadside_requests")
+    user: Mapped["User | None"] = relationship("User", foreign_keys=[user_id], back_populates="roadside_requests")
     vehicle: Mapped["Vehicle | None"] = relationship(back_populates="roadside_requests")
     assigned_mechanic: Mapped["User | None"] = relationship("User", foreign_keys=[assigned_mechanic_id], back_populates="assigned_roadside_requests")
     assignments: Mapped[list["RoadsideAssignment"]] = relationship(

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useVoiceChat } from "./useVoiceChat";
 
 interface Message {
     role: "user" | "assistant";
@@ -71,6 +72,24 @@ export default function ChatWidget() {
     const [input, setInput] = useState("");
     const [loading, setLoading] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const messagesRef = useRef<Message[]>(messages);
+    useEffect(() => {
+        messagesRef.current = messages;
+    }, [messages]);
+
+    const voice = useVoiceChat({
+        url: "ws://localhost:8000/api/voice/ws",
+        getToken: () => (typeof window !== "undefined" ? localStorage.getItem("token") : null),
+        getHistory: () => messagesRef.current.map((m) => ({ role: m.role, content: m.content })),
+        onUserTranscript: (text) => setMessages((prev) => [...prev, { role: "user", content: text }]),
+        onReply: (r) =>
+            setMessages((prev) => [
+                ...prev,
+                { role: "assistant", content: r.reply, branch: r.branch, booking_id: r.booking_id, booking_link: r.booking_link },
+            ]),
+        onError: (message) => setMessages((prev) => [...prev, { role: "assistant", content: message }]),
+    });
+    const voiceOn = voice.state !== "off";
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -80,7 +99,7 @@ export default function ChatWidget() {
         if (isOpen) {
             scrollToBottom();
         }
-    }, [messages, isOpen]);
+    }, [messages, isOpen, voice.partial]);
 
     const handleSend = async (queryText?: string) => {
         const textToSend = (queryText || input).trim();
@@ -158,7 +177,7 @@ export default function ChatWidget() {
                             </div>
                         </div>
                         <button
-                            onClick={() => setIsOpen(false)}
+                            onClick={() => { voice.stop(); setIsOpen(false); }}
                             className="text-gray-400 hover:text-white text-xs p-1 rounded hover:bg-[#1e293b] transition-colors"
                         >
                             ✕
@@ -200,12 +219,28 @@ export default function ChatWidget() {
                                     {/* Operational Branch Tag */}
                                     {m.branch && (
                                         <span className="text-[9px] text-gray-500 mt-0.5 px-1 font-mono uppercase">
-                                            {m.branch === "groq_llm" ? "🤖 Groq LLM" : m.branch === "grounded_rag" ? "📘 Grounded RAG" : m.branch === "live_backend_tool" ? "⚡ Live Backend Tool" : "🛡️ Core Booking Flow"}
+                                            {m.branch === "groq_llm" ? "🤖 Groq LLM" : m.branch === "grounded_rag" ? "📘 Grounded RAG" : m.branch === "live_backend_tool" ? "⚡ Live Backend Tool" : m.branch === "booking_lookup" ? "🔎 Booking Lookup" : "🛡️ Core Booking Flow"}
                                         </span>
                                     )}
                                 </div>
                             );
                         })}
+
+                        {voice.partial && (
+                            <div className="flex flex-col items-end">
+                                <div className="max-w-[85%] px-3.5 py-2.5 rounded-xl leading-relaxed bg-[#2563EB]/40 text-white/80 italic">
+                                    {voice.partial}…
+                                </div>
+                            </div>
+                        )}
+
+                        {voice.state === "thinking" && (
+                            <div className="flex justify-start">
+                                <div className="bg-[#151D2A] text-gray-400 border border-[#1e293b] px-3.5 py-2 rounded-xl text-[11px]">
+                                    Thinking…
+                                </div>
+                            </div>
+                        )}
 
                         {loading && (
                             <div className="flex justify-start">
@@ -235,6 +270,24 @@ export default function ChatWidget() {
                         </div>
                     )}
 
+                    {/* Voice status */}
+                    {voiceOn && (
+                        <div className="px-3 py-1.5 bg-[#0b1220] border-t border-[#1e293b]/50 flex items-center justify-between text-[10px] text-gray-300">
+                            <span className="flex items-center gap-1.5">
+                                <span className={`w-1.5 h-1.5 rounded-full ${voice.state === "listening" ? "bg-emerald-400 animate-pulse" : voice.state === "speaking" ? "bg-sky-400 animate-pulse" : "bg-yellow-400"}`}></span>
+                                {voice.state === "connecting" && "Connecting…"}
+                                {voice.state === "listening" && "Listening — just speak"}
+                                {voice.state === "thinking" && "Thinking…"}
+                                {voice.state === "speaking" && "Speaking — talk to interrupt"}
+                            </span>
+                            {voice.state === "speaking" && (
+                                <button type="button" onClick={voice.interrupt} className="text-[#38bdf8] hover:text-white font-bold">
+                                    Stop
+                                </button>
+                            )}
+                        </div>
+                    )}
+
                     {/* Input Bar */}
                     <form
                         onSubmit={(e) => {
@@ -251,6 +304,19 @@ export default function ChatWidget() {
                             disabled={loading}
                             className="flex-1 bg-[#090D14] text-white text-xs px-3 py-2 rounded-lg border border-[#1e293b] focus:outline-none focus:border-[#2563EB] transition-colors"
                         />
+                        <button
+                            type="button"
+                            onClick={() => (voiceOn ? voice.stop() : voice.start())}
+                            title={voiceOn ? "End voice mode" : "Talk to the assistant"}
+                            aria-label={voiceOn ? "End voice mode" : "Start voice mode"}
+                            className={`px-2.5 py-2 rounded-lg text-xs font-bold transition-all border ${
+                                voiceOn
+                                    ? "bg-red-500/20 border-red-500/50 text-red-300 hover:bg-red-500/30"
+                                    : "bg-[#090D14] border-[#1e293b] text-gray-300 hover:border-[#2563EB]"
+                            }`}
+                        >
+                            {voiceOn ? "■" : "🎤"}
+                        </button>
                         <button
                             type="submit"
                             disabled={loading || !input.trim()}

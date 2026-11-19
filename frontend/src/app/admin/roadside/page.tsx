@@ -306,11 +306,16 @@ export default function AdminRoadsidePage() {
                                             </td>
 
                                             <td className="px-5 py-3.5">
-                                                <p className="font-bold text-white">{r.user?.full_name || `User ${r.user_id}`}</p>
+                                                <p className="font-bold text-white">
+                                                    {r.user?.full_name || r.guest_name || `User ${r.user_id}`}
+                                                    {!r.user && r.guest_name && (
+                                                        <span className="ml-2 text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">Guest</span>
+                                                    )}
+                                                </p>
                                                 <p className="text-[11px] text-gray-300 font-mono mt-0.5">
-                                                    {r.user?.phone ? (
-                                                        <a href={`tel:${r.user.phone}`} className="hover:text-[#2563EB] transition-colors">
-                                                            📞 {r.user.phone}
+                                                    {(r.user?.phone || r.guest_phone) ? (
+                                                        <a href={`tel:${r.user?.phone || r.guest_phone}`} className="hover:text-[#2563EB] transition-colors">
+                                                            📞 {r.user?.phone || r.guest_phone}
                                                         </a>
                                                     ) : "—"}
                                                 </p>
@@ -322,6 +327,8 @@ export default function AdminRoadsidePage() {
                                                         <p className="text-white font-medium">{r.vehicle.year} {r.vehicle.make} {r.vehicle.model}</p>
                                                         <p className="text-[11px] text-gray-400 font-mono">{r.vehicle.registration}</p>
                                                     </div>
+                                                ) : r.guest_vehicle ? (
+                                                    <p className="text-white font-medium">{r.guest_vehicle}</p>
                                                 ) : (
                                                     <span className="text-gray-400 italic">Unregistered / Rental</span>
                                                 )}
@@ -330,8 +337,9 @@ export default function AdminRoadsidePage() {
                                             <td className="px-5 py-3.5">
                                                 <span className="font-semibold text-white block">{r.issue_type}</span>
                                                 {r.notes && (
-                                                    <p className="text-[11px] text-gray-400 max-w-xs truncate mt-0.5" title={r.notes}>
-                                                        Note: {r.notes}
+                                                    <p className="mt-1 max-w-xs whitespace-pre-wrap break-words rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
+                                                        <span className="font-bold uppercase text-[10px] text-amber-400">Customer note: </span>
+                                                        {r.notes}
                                                     </p>
                                                 )}
                                             </td>
