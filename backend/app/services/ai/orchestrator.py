@@ -38,7 +38,7 @@ Operational Rules:
    - engine overheating / steam / smoke -> Advise pulling over safely immediately and recommend "Emergency Towing" (Roadside) or "Engine Diagnostics" (Workshop).
    - squeaking or grinding brakes -> Recommend "Brake Inspection & Pad Replacement" (Workshop).
    - routine servicing / oil -> Recommend "Full Synthetic Oil Change" (Workshop/Home) or "Standard Vehicle Service".
-3. Quote all prices in Pakistani Rupees (PKR / Rs.).
+3. Quote all prices in Pakistani Rupees (PKR / Rs.). Use ONLY the prices in the live service catalog given at the end of these instructions; if a service or price is not listed there, say you do not have it instead of guessing. Never state or guess appointment availability: tell the user to ask "availability on YYYY-MM-DD" or use the booking form.
 4. Keep answers concise, practical, and strictly under 3 sentences.
 5. Never use generic greetings like "Hello, how can I help?" if the user asks a direct question. Address their problem immediately.
 6. If the user wants to book an appointment, let them know they can schedule directly via the dashboard or tell you their vehicle and desired date."""
@@ -93,7 +93,21 @@ class AIAssistantOrchestrator:
     - Fallback: Deterministic rule-based engine (Grounded RAG and live tools) if Groq is unavailable or key is missing.
     """
 
-    def call_groq_api(self, message: str, history: list[dict[str, str]]) -> str | None:
+    def _catalog_text(self, db: Session) -> str:
+        """Live service list appended to the LLM prompt so it quotes real prices."""
+        try:
+            services = get_live_services_tool(db)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Could not load live services for the prompt: %s", exc)
+            return ""
+        if not services:
+            return ""
+        lines = ["", "LIVE SERVICE CATALOG (the only prices you may quote):"]
+        for s in services:
+            lines.append(f"- {s['name']} ({s['category']}): Rs. {s['base_price']:.0f}, about {s['duration_minutes']} min")
+        return "\n".join(lines)
+
+    def call_groq_api(self, message: str, history: list[dict[str, str]], extra_context: str = "") -> str | None:
         """
         Executes a real HTTP request to the Groq Chat Completions API.
         Returns the assistant's reply string, or None if the request fails or key is missing.
@@ -104,7 +118,7 @@ class AIAssistantOrchestrator:
             return None
 
         # Build message history for the LLM
-        messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT + extra_context}]
 
         # Include recent history (up to last 6 messages)
         for h in history[-6:]:
@@ -415,8 +429,11 @@ class AIAssistantOrchestrator:
 
             all_services = get_live_services_tool(db)
             user_messages = [m.get("content", "") for m in history if m.get("role") == "user"] + [message]
+            # A reply like "Yes please book it" contains a trigger word, so on confirmation
+            # look for the start of the booking request in the earlier messages only.
+            search_messages = user_messages[:-1] if intent == "BOOKING_CONFIRMATION" else user_messages
             latest_booking_request = max(
-                (i for i, text in enumerate(user_messages)
+                (i for i, text in enumerate(search_messages)
                  if any(word in text.lower() for word in BOOKING_TRIGGER_WORDS)),
                 default=0,
             )
@@ -613,7 +630,11 @@ class AIAssistantOrchestrator:
         # ---------------------------------------------------------
         # 2. REAL GROQ LLM INFERENCE (Primary for Advice, Diagnostics, FAQs, Inquiries)
         # ---------------------------------------------------------
-        llm_reply = self.call_groq_api(message=message, history=history)
+        # Prices and availability must come from the database, never from the LLM.
+        if intent in ("LIVE_PRICING", "LIVE_AVAILABILITY"):
+            return self._execute_rule_based_fallback(intent=intent, db=db, message=message)
+
+        llm_reply = self.call_groq_api(message=message, history=history, extra_context=self._catalog_text(db))
         if llm_reply:
             return {
                 "branch": "groq_llm",
